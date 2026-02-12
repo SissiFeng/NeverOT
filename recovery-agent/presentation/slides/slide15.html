@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+html { background: #ffffff; }
+body {
+  width: 720pt; height: 405pt; margin: 0; padding: 0;
+  background: #1C2833; font-family: Arial, sans-serif;
+  display: flex; flex-direction: column; justify-content: center;
+  align-items: center;
+}
+.accent-bar {
+  position: absolute; bottom: 0; left: 0; width: 100%; height: 6pt;
+  background: #667eea;
+}
+.takeaways {
+  display: flex; flex-direction: column; gap: 20pt;
+  max-width: 540pt;
+}
+.takeaway {
+  display: flex; gap: 12pt; align-items: flex-start;
+}
+.num {
+  background: #667eea; color: #ffffff; width: 24pt; height: 24pt;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 12pt; font-weight: bold; flex-shrink: 0;
+}
+.text {
+  color: #ffffff; font-size: 14pt; line-height: 1.4; margin: 0;
+}
+.footer {
+  position: absolute; bottom: 20pt;
+}
+.footer p {
+  color: #5D6D7E; font-size: 10pt; font-style: italic; margin: 0;
+}
+</style>
+</head>
+<body>
+<div class="takeaways">
+  <div class="takeaway">
+    <div class="num"><p>1</p></div>
+    <p class="text">Hierarchical agents need a physically grounded execution layer</p>
+  </div>
+  <div class="takeaway">
+    <div class="num"><p>2</p></div>
+    <p class="text">Recovery is the foundation of continuous discovery</p>
+  </div>
+  <div class="takeaway">
+    <div class="num"><p>3</p></div>
+    <p class="text">This layer makes Alan's architecture deployable in real labs</p>
+  </div>
+</div>
+<div class="footer">
+  <p>Infrastructure-level contribution, not a single agent idea</p>
+</div>
+<div class="accent-bar"></div>
+</body>
+</html>

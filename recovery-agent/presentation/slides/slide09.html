@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+html { background: #ffffff; }
+body {
+  width: 720pt; height: 405pt; margin: 0; padding: 0;
+  background: #ffffff; font-family: Arial, sans-serif;
+  display: flex; flex-direction: column;
+}
+.header {
+  background: #667eea; padding: 18pt 30pt; margin: 0;
+}
+.header h1 {
+  color: #ffffff; font-size: 18pt; margin: 0; font-weight: bold;
+}
+.header-sub {
+  color: #D5D8DC; font-size: 10pt; margin-top: 4pt;
+}
+.content {
+  padding: 20pt 30pt 35pt 30pt; flex: 1; display: flex; gap: 20pt;
+}
+.diagram {
+  flex: 1; display: flex; flex-direction: column;
+}
+.anomaly-source {
+  background: #2E4053; color: #ffffff; padding: 12pt;
+  text-align: center; font-size: 11pt; font-weight: bold;
+  margin-bottom: 15pt;
+}
+.branch-container {
+  display: flex; gap: 8pt; justify-content: center;
+}
+.branch {
+  width: 110pt; text-align: center;
+}
+.branch-box {
+  padding: 10pt 6pt; font-size: 9pt; font-weight: bold;
+  margin-bottom: 6pt;
+}
+.safety { background: #E74C3C; color: #ffffff; }
+.execution { background: #F39C12; color: #ffffff; }
+.scientific { background: #27AE60; color: #ffffff; }
+.branch-action {
+  font-size: 8pt; color: #5D6D7E; padding: 6pt;
+  background: #F4F6F6;
+}
+.branch-action p { margin: 2pt 0; }
+.insight {
+  width: 220pt; display: flex; flex-direction: column; justify-content: center;
+}
+.insight-box {
+  background: #1C2833; padding: 14pt; margin-bottom: 12pt;
+}
+.insight-box p {
+  color: #ffffff; font-size: 10pt; margin: 0; line-height: 1.4;
+}
+.emphasis { color: #667eea; font-weight: bold; }
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>Scientific Anomaly Channel</h1>
+  <p class="header-sub">Critical for Continuous Discovery</p>
+</div>
+<div class="content">
+  <div class="diagram">
+    <div class="anomaly-source"><p>ANOMALY DETECTED</p></div>
+    <div class="branch-container">
+      <div class="branch">
+        <div class="branch-box safety"><p>Safety Anomaly</p></div>
+        <div class="branch-action"><p>ABORT</p><p>Protect equipment</p></div>
+      </div>
+      <div class="branch">
+        <div class="branch-box execution"><p>Execution Anomaly</p></div>
+        <div class="branch-action"><p>RECOVER</p><p>Retry or degrade</p></div>
+      </div>
+      <div class="branch">
+        <div class="branch-box scientific"><p>Scientific Anomaly</p></div>
+        <div class="branch-action"><p>PRESERVE</p><p>Anomalous but valid</p></div>
+      </div>
+    </div>
+  </div>
+  <div class="insight">
+    <div class="insight-box">
+      <p>Discovery happens in the <span class="emphasis">offline analysis channel</span>, not in recovery logic.</p>
+    </div>
+    <div class="insight-box">
+      <p>This implements <span class="emphasis">"critical state for continuous discovery"</span> from Alan's second paper.</p>
+    </div>
+  </div>
+</div>
+</body>
+</html>

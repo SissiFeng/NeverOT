@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+html { background: #ffffff; }
+body {
+  width: 720pt; height: 405pt; margin: 0; padding: 0;
+  background: #ffffff; font-family: Arial, sans-serif;
+  display: flex; flex-direction: column;
+}
+.header {
+  background: #1C2833; padding: 18pt 30pt; margin: 0;
+}
+.header h1 {
+  color: #ffffff; font-size: 20pt; margin: 0; font-weight: bold;
+}
+.content {
+  padding: 15pt 50pt 40pt 50pt; flex: 1; display: flex; flex-direction: column;
+  justify-content: center; align-items: center;
+}
+.layer {
+  width: 380pt; padding: 10pt 0; text-align: center;
+  font-size: 12pt; font-weight: bold; margin: 1pt 0;
+}
+.layer-planner { background: #D5D8DC; color: #2E4053; }
+.layer-hier { background: #AEB6BF; color: #1C2833; }
+.layer-exec {
+  background: #667eea; color: #ffffff;
+  border: 2pt solid #4A56C4;
+}
+.layer-phys { background: #2E4053; color: #ffffff; }
+.arrow {
+  width: 0; height: 0;
+  border-left: 8pt solid transparent;
+  border-right: 8pt solid transparent;
+  border-top: 6pt solid #5D6D7E;
+}
+.highlight {
+  display: flex; align-items: center; gap: 12pt;
+}
+.highlight-label {
+  background: #E74C3C; color: #ffffff; padding: 3pt 8pt;
+  font-size: 8pt; font-weight: bold;
+}
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>Position in El Agente Q Architecture</h1>
+</div>
+<div class="content">
+  <div class="layer layer-planner"><p>Planner</p></div>
+  <div class="arrow"></div>
+  <div class="layer layer-hier"><p>Hierarchical Agents</p></div>
+  <div class="arrow"></div>
+  <div class="highlight">
+    <div class="layer layer-exec"><p>Executor + Recovery</p></div>
+    <div class="highlight-label"><p>YOU ARE HERE</p></div>
+  </div>
+  <div class="arrow"></div>
+  <div class="layer layer-phys"><p>Physical World</p></div>
+</div>
+</body>
+</html>

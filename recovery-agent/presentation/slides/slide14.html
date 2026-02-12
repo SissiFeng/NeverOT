@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+html { background: #ffffff; }
+body {
+  width: 720pt; height: 405pt; margin: 0; padding: 0;
+  background: #ffffff; font-family: Arial, sans-serif;
+  display: flex; flex-direction: column;
+}
+.header {
+  background: #1C2833; padding: 18pt 30pt; margin: 0;
+}
+.header h1 {
+  color: #ffffff; font-size: 18pt; margin: 0; font-weight: bold;
+}
+.content {
+  padding: 25pt 35pt 40pt 35pt; flex: 1; display: flex; flex-direction: column;
+  justify-content: center;
+}
+.phases {
+  display: flex; gap: 12pt;
+}
+.phase {
+  flex: 1; padding: 15pt; position: relative;
+}
+.phase-1 { background: #667eea; }
+.phase-2 { background: #5D6D7E; }
+.phase-3 { background: #2E4053; }
+.phase-num {
+  color: rgba(255,255,255,0.3); font-size: 36pt; font-weight: bold;
+  position: absolute; top: 8pt; right: 12pt; margin: 0;
+}
+.phase-title {
+  color: #ffffff; font-size: 11pt; font-weight: bold;
+  margin: 0 0 8pt 0;
+}
+.phase-desc {
+  color: rgba(255,255,255,0.9); font-size: 9pt; line-height: 1.4; margin: 0;
+}
+.phase-status {
+  position: absolute; bottom: 8pt; left: 15pt;
+  font-size: 8pt; font-weight: bold; margin: 0;
+}
+.now { color: #27AE60; }
+.future { color: #AAB7B8; }
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>Roadmap: Integration with Alan Agents</h1>
+</div>
+<div class="content">
+  <div class="phases">
+    <div class="phase phase-1">
+      <p class="phase-num">1</p>
+      <p class="phase-title">Policy-Driven Recovery</p>
+      <p class="phase-desc">Deterministic recovery engine with signature analysis and configurable policies</p>
+      <p class="phase-status now">NOW</p>
+    </div>
+    <div class="phase phase-2">
+      <p class="phase-num">2</p>
+      <p class="phase-title">RecoveryAdvisor via LLM</p>
+      <p class="phase-desc">Connect to Alan reasoning agent for complex recovery decisions</p>
+      <p class="phase-status future">NEXT</p>
+    </div>
+    <div class="phase phase-3">
+      <p class="phase-num">3</p>
+      <p class="phase-title">Self-Organizing Graph</p>
+      <p class="phase-desc">Execution graph learns and adapts from experience</p>
+      <p class="phase-status future">FUTURE</p>
+    </div>
+  </div>
+</div>
+</body>
+</html>

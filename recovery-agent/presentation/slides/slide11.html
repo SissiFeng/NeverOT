@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+html { background: #ffffff; }
+body {
+  width: 720pt; height: 405pt; margin: 0; padding: 0;
+  background: #ffffff; font-family: Arial, sans-serif;
+  display: flex; flex-direction: column;
+}
+.header {
+  background: #1C2833; padding: 18pt 30pt; margin: 0;
+}
+.header h1 {
+  color: #ffffff; font-size: 18pt; margin: 0; font-weight: bold;
+}
+.content {
+  padding: 20pt 30pt 35pt 30pt; flex: 1;
+}
+.interfaces {
+  display: flex; flex-direction: column; gap: 10pt;
+}
+.interface {
+  display: flex; gap: 12pt;
+}
+.if-num {
+  background: #667eea; color: #ffffff; width: 24pt; height: 24pt;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 14pt; font-weight: bold; flex-shrink: 0;
+}
+.if-content {
+  flex: 1; background: #F4F6F6; padding: 10pt 12pt;
+}
+.if-name {
+  font-family: Courier New, monospace; color: #667eea;
+  font-size: 10pt; font-weight: bold; margin: 0 0 4pt 0;
+}
+.if-desc {
+  color: #5D6D7E; font-size: 9pt; margin: 0;
+}
+.note-box {
+  background: #1C2833; padding: 14pt 20pt; margin-top: 15pt;
+}
+.note-title {
+  color: #667eea; font-size: 10pt; font-weight: bold; margin: 0 0 8pt 0;
+}
+.note-list {
+  color: #ffffff; font-size: 10pt; margin: 0; padding-left: 15pt;
+}
+.note-list li { margin-bottom: 4pt; }
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>Interface to Hierarchical Agents</h1>
+</div>
+<div class="content">
+  <div class="interfaces">
+    <div class="interface">
+      <div class="if-num"><p>1</p></div>
+      <div class="if-content">
+        <p class="if-name">execute_plan(plan) -> RunResult</p>
+        <p class="if-desc">Main entry point. Takes a plan from upper agent, returns execution outcome.</p>
+      </div>
+    </div>
+    <div class="interface">
+      <div class="if-num"><p>2</p></div>
+      <div class="if-content">
+        <p class="if-name">RecoveryAdvisor hook</p>
+        <p class="if-desc">Optional callback for upper agent to provide recovery hints.</p>
+      </div>
+    </div>
+    <div class="interface">
+      <div class="if-num"><p>3</p></div>
+      <div class="if-content">
+        <p class="if-name">RunObserver / event stream</p>
+        <p class="if-desc">Real-time event stream for monitoring: telemetry, decisions, errors.</p>
+      </div>
+    </div>
+  </div>
+  <div class="note-box">
+    <p class="note-title">Design Philosophy</p>
+    <ul class="note-list">
+      <li>I do not touch planning</li>
+      <li>I only provide reliable execution backend</li>
+      <li>Alan agents only need these three interfaces</li>
+    </ul>
+  </div>
+</div>
+</body>
+</html>

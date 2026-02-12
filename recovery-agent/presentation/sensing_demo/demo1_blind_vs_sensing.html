@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Demo 1: Blind vs Sensing-Aware Recovery</title>
+<style>
+html { background: #ffffff; }
+* { box-sizing: border-box; }
+body {
+  width: 1200px; height: 800px; margin: 0 auto; padding: 0;
+  background: #ffffff; font-family: 'Segoe UI', Arial, sans-serif;
+  display: flex; flex-direction: column;
+}
+.header {
+  background: linear-gradient(135deg, #1C2833 0%, #2E4053 100%);
+  padding: 20px 40px; margin: 0;
+  display: flex; justify-content: space-between; align-items: center;
+}
+.header h1 {
+  color: #ffffff; font-size: 24px; margin: 0; font-weight: 600;
+}
+.header .badge {
+  background: #667eea; color: white; padding: 6px 16px;
+  border-radius: 20px; font-size: 12px; font-weight: 600;
+}
+.content {
+  flex: 1; display: flex; padding: 30px 40px; gap: 30px;
+}
+.panel {
+  flex: 1; background: #F8F9FA; border-radius: 12px;
+  padding: 24px; display: flex; flex-direction: column;
+}
+.panel-title {
+  font-size: 16px; font-weight: 700; color: #1C2833;
+  margin-bottom: 20px; padding-bottom: 12px;
+  border-bottom: 3px solid #667eea;
+  display: flex; align-items: center; gap: 10px;
+}
+.panel-title .icon { font-size: 20px; }
+
+/* Timeline styles */
+.timeline { flex: 1; }
+.timeline-item {
+  display: flex; margin-bottom: 16px; align-items: flex-start;
+}
+.timeline-time {
+  width: 60px; font-size: 12px; font-weight: 600;
+  color: #5D6D7E; padding-top: 4px;
+}
+.timeline-content {
+  flex: 1; background: white; border-radius: 8px;
+  padding: 12px 16px; box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+}
+.timeline-content.error {
+  border-left: 4px solid #E74C3C;
+}
+.timeline-content.success {
+  border-left: 4px solid #27AE60;
+}
+.timeline-content.warning {
+  border-left: 4px solid #F39C12;
+}
+.timeline-content p {
+  margin: 0; font-size: 13px; color: #2E4053;
+}
+.timeline-content .label {
+  font-weight: 600; color: #1C2833;
+}
+
+/* Sensor panel styles */
+.sensor-grid {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 12px;
+  margin-bottom: 20px;
+}
+.sensor-card {
+  background: white; border-radius: 8px; padding: 14px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+}
+.sensor-card.critical {
+  border: 2px solid #E74C3C;
+  background: #FDF2F2;
+}
+.sensor-card.warning {
+  border: 2px solid #F39C12;
+  background: #FEF9E7;
+}
+.sensor-card.ok {
+  border: 2px solid #27AE60;
+  background: #F0FDF4;
+}
+.sensor-name {
+  font-size: 11px; color: #5D6D7E; margin-bottom: 4px;
+  text-transform: uppercase; letter-spacing: 0.5px;
+}
+.sensor-value {
+  font-size: 24px; font-weight: 700; color: #1C2833;
+}
+.sensor-unit {
+  font-size: 12px; color: #5D6D7E; margin-left: 4px;
+}
+.sensor-status {
+  font-size: 11px; margin-top: 6px; font-weight: 600;
+}
+.sensor-status.critical { color: #E74C3C; }
+.sensor-status.warning { color: #F39C12; }
+.sensor-status.ok { color: #27AE60; }
+
+/* State badge */
+.state-badge {
+  display: inline-block; padding: 8px 20px; border-radius: 8px;
+  font-size: 14px; font-weight: 700; margin-bottom: 16px;
+}
+.state-safe { background: #D5F5E3; color: #1D8348; }
+.state-interlocked { background: #FADBD8; color: #C0392B; }
+
+/* Decision box */
+.decision-box {
+  background: white; border-radius: 8px; padding: 16px;
+  margin-top: auto;
+}
+.decision-box.blocked {
+  border: 2px solid #E74C3C;
+  background: linear-gradient(135deg, #FDF2F2 0%, #FADBD8 100%);
+}
+.decision-box.allowed {
+  border: 2px solid #27AE60;
+  background: linear-gradient(135deg, #F0FDF4 0%, #D5F5E3 100%);
+}
+.decision-title {
+  font-size: 12px; color: #5D6D7E; margin-bottom: 8px;
+  text-transform: uppercase; letter-spacing: 0.5px;
+}
+.decision-result {
+  font-size: 18px; font-weight: 700;
+  display: flex; align-items: center; gap: 8px;
+}
+.decision-result.blocked { color: #C0392B; }
+.decision-result.allowed { color: #27AE60; }
+
+/* Evidence section */
+.evidence-section {
+  background: #EBF5FB; border-radius: 8px; padding: 14px;
+  margin-top: 16px;
+}
+.evidence-title {
+  font-size: 11px; color: #2874A6; margin-bottom: 8px;
+  text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600;
+}
+.evidence-item {
+  font-size: 12px; color: #1C2833; margin: 4px 0;
+  font-family: 'Monaco', 'Consolas', monospace;
+}
+
+/* Comparison arrow */
+.comparison {
+  display: flex; align-items: center; justify-content: center;
+  padding: 20px; gap: 20px;
+}
+.vs-badge {
+  background: #667eea; color: white; padding: 10px 20px;
+  border-radius: 50%; font-weight: 700; font-size: 14px;
+}
+.outcome-box {
+  flex: 1; text-align: center; padding: 16px;
+  border-radius: 12px;
+}
+.outcome-box.danger {
+  background: linear-gradient(135deg, #FDF2F2 0%, #FADBD8 100%);
+  border: 2px solid #E74C3C;
+}
+.outcome-box.safe {
+  background: linear-gradient(135deg, #F0FDF4 0%, #D5F5E3 100%);
+  border: 2px solid #27AE60;
+}
+.outcome-label {
+  font-size: 12px; color: #5D6D7E; margin-bottom: 8px;
+}
+.outcome-text {
+  font-size: 16px; font-weight: 700;
+}
+.outcome-text.danger { color: #C0392B; }
+.outcome-text.safe { color: #1D8348; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>Demo 1: Blind vs Sensing-Aware Recovery</h1>
+  <span class="badge">SENSING LAYER</span>
+</div>
+
+<div class="content">
+  <!-- Left Panel: OLD System -->
+  <div class="panel">
+    <div class="panel-title">
+      <span class="icon">⚡</span>
+      Step A: OLD System (Blind Recovery)
+    </div>
+
+    <div class="timeline">
+      <div class="timeline-item">
+        <div class="timeline-time">t=0s</div>
+        <div class="timeline-content">
+          <p><span class="label">Starting</span> heating reaction...</p>
+        </div>
+      </div>
+      <div class="timeline-item">
+        <div class="timeline-time">t=5s</div>
+        <div class="timeline-content">
+          <p>Heating in progress, temp rising</p>
+        </div>
+      </div>
+      <div class="timeline-item">
+        <div class="timeline-time">t=10s</div>
+        <div class="timeline-content error">
+          <p><span class="label">ERROR:</span> Device timeout</p>
+          <p style="font-size: 11px; color: #7B8794; margin-top: 4px;">
+            Agent has no idea WHY it failed
+          </p>
+        </div>
+      </div>
+      <div class="timeline-item">
+        <div class="timeline-time">t=12s</div>
+        <div class="timeline-content success">
+          <p><span class="label">RETRY</span> → Success! Continuing...</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="decision-box allowed">
+      <div class="decision-title">Agent Decision</div>
+      <div class="decision-result allowed">
+        ✓ RETRY ALLOWED
+      </div>
+      <p style="font-size: 12px; color: #5D6D7E; margin: 8px 0 0 0;">
+        Looks smart! But what if the timeout was hiding danger?
+      </p>
+    </div>
+  </div>
+
+  <!-- Right Panel: NEW System -->
+  <div class="panel">
+    <div class="panel-title">
+      <span class="icon">🛡️</span>
+      Step B: NEW System (Sensing-Aware)
+    </div>
+
+    <div class="sensor-grid">
+      <div class="sensor-card critical">
+        <div class="sensor-name">Temperature</div>
+        <div class="sensor-value">135.0<span class="sensor-unit">°C</span></div>
+        <div class="sensor-status critical">❗ OVER LIMIT (130°C)</div>
+      </div>
+      <div class="sensor-card critical">
+        <div class="sensor-name">Hood Airflow</div>
+        <div class="sensor-value">0.25<span class="sensor-unit">m/s</span></div>
+        <div class="sensor-status critical">❗ TOO LOW (min 0.3)</div>
+      </div>
+      <div class="sensor-card warning">
+        <div class="sensor-name">Pressure</div>
+        <div class="sensor-value">175.0<span class="sensor-unit">kPa</span></div>
+        <div class="sensor-status warning">⚠ ELEVATED</div>
+      </div>
+      <div class="sensor-card critical">
+        <div class="sensor-name">Temp Slope</div>
+        <div class="sensor-value">3.8<span class="sensor-unit">°C/min</span></div>
+        <div class="sensor-status critical">❗ RAPID RISE</div>
+      </div>
+    </div>
+
+    <span class="state-badge state-interlocked">🔒 INTERLOCKED</span>
+
+    <div class="decision-box blocked">
+      <div class="decision-title">RecoveryGate Decision</div>
+      <div class="decision-result blocked">
+        ✕ START_HEAT BLOCKED
+      </div>
+      <p style="font-size: 12px; color: #943126; margin: 8px 0 0 0;">
+        Reason: INTERLOCKED state (temperature_high + hood_airflow_low)
+      </p>
+    </div>
+
+    <div class="evidence-section">
+      <div class="evidence-title">📋 Evidence Chain</div>
+      <div class="evidence-item">snapshot_id: 8c96608267976cff...</div>
+      <div class="evidence-item">trigger: temp=135.0, airflow=0.25</div>
+    </div>
+  </div>
+</div>
+
+<div class="comparison">
+  <div class="outcome-box danger">
+    <div class="outcome-label">OLD System Outcome</div>
+    <div class="outcome-text danger">⚠️ Blindly retries → Potential disaster</div>
+  </div>
+  <div class="vs-badge">VS</div>
+  <div class="outcome-box safe">
+    <div class="outcome-label">NEW System Outcome</div>
+    <div class="outcome-text safe">✓ Real-world state blocks unsafe recovery</div>
+  </div>
+</div>
+
+</body>
+</html>

@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+html { background: #ffffff; }
+body {
+  width: 720pt; height: 405pt; margin: 0; padding: 0;
+  background: #1C2833; font-family: Arial, sans-serif;
+  display: flex; flex-direction: column;
+}
+.header {
+  padding: 12pt 25pt; margin: 0;
+}
+.header h1 {
+  color: #ffffff; font-size: 16pt; margin: 0; font-weight: bold;
+}
+.content {
+  padding: 8pt 20pt; flex: 1; display: flex; gap: 12pt;
+}
+.pipeline {
+  flex: 1; display: flex; flex-direction: column; gap: 6pt;
+}
+.stage {
+  background: #2E4053; padding: 8pt 10pt; display: flex; gap: 10pt;
+  align-items: center;
+}
+.stage-num {
+  background: #667eea; color: #ffffff; width: 18pt; height: 18pt;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 10pt; font-weight: bold; flex-shrink: 0;
+}
+.stage-content {
+  flex: 1;
+}
+.stage-title {
+  color: #667eea; font-size: 9pt; font-weight: bold; margin: 0 0 2pt 0;
+}
+.stage-data {
+  color: #AAB7B8; font-family: Courier New, monospace; font-size: 7pt;
+  margin: 0; line-height: 1.3;
+}
+.stage-output {
+  color: #27AE60; font-size: 8pt; margin: 2pt 0 0 0;
+}
+.arrow {
+  text-align: center; color: #5D6D7E; font-size: 10pt; margin: 0;
+}
+.result {
+  width: 200pt; display: flex; flex-direction: column; gap: 6pt;
+}
+.result-box {
+  background: #27AE60; padding: 10pt;
+}
+.result-title {
+  color: #ffffff; font-size: 10pt; font-weight: bold; margin: 0 0 6pt 0;
+}
+.result-item {
+  color: rgba(255,255,255,0.9); font-size: 8pt; margin: 0 0 3pt 0;
+}
+.metrics-box {
+  background: #2E4053; padding: 8pt; flex: 1;
+}
+.metrics-title-wrap {
+  border-bottom: 1pt solid #667eea; padding-bottom: 4pt; margin-bottom: 6pt;
+}
+.metrics-title {
+  color: #667eea; font-size: 9pt; font-weight: bold; margin: 0;
+}
+.metric-row {
+  display: flex; justify-content: space-between; margin-bottom: 2pt;
+}
+.metric-name {
+  color: #AAB7B8; font-size: 7pt; margin: 0;
+}
+.metric-value {
+  color: #ffffff; font-size: 7pt; font-weight: bold; margin: 0;
+}
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>Case: Heater Overshoot Pipeline</h1>
+</div>
+<div class="content">
+  <div class="pipeline">
+    <div class="stage">
+      <div class="stage-num"><p>1</p></div>
+      <div class="stage-content">
+        <p class="stage-title">LOG: Raw Telemetry</p>
+        <p class="stage-data">[T+9.0s] temp=128.0°C target=120.0°C OVERSHOOT</p>
+        <p class="stage-output">→ HardwareError(type="overshoot")</p>
+      </div>
+    </div>
+    <p class="arrow">▼</p>
+    <div class="stage">
+      <div class="stage-num"><p>2</p></div>
+      <div class="stage-content">
+        <p class="stage-title">CLASSIFY: Error Profile</p>
+        <p class="stage-data">overshoot → safety_violation category</p>
+        <p class="stage-output">→ unsafe=True, recoverable=True, strategy="degrade"</p>
+      </div>
+    </div>
+    <p class="arrow">▼</p>
+    <div class="stage">
+      <div class="stage-num"><p>3</p></div>
+      <div class="stage-content">
+        <p class="stage-title">SIGNATURE: Fault Pattern</p>
+        <p class="stage-data">history=[25,38,52,65,79,92,106,119,128] slope=12.8</p>
+        <p class="stage-output">→ mode="drift", confidence=0.85</p>
+      </div>
+    </div>
+    <p class="arrow">▼</p>
+    <div class="stage">
+      <div class="stage-num"><p>4</p></div>
+      <div class="stage-content">
+        <p class="stage-title">POLICY: Recovery Decision</p>
+        <p class="stage-data">unsafe + recoverable + drift → degrade path</p>
+        <p class="stage-output">→ kind="degrade", target=110°C, sample=compromised</p>
+      </div>
+    </div>
+    <p class="arrow">▼</p>
+    <div class="stage">
+      <div class="stage-num"><p>5</p></div>
+      <div class="stage-content">
+        <p class="stage-title">EXECUTE: Recovery Actions</p>
+        <p class="stage-data">cool_down() → set_temp(110) → wait(5s)</p>
+        <p class="stage-output">→ temp=110.2°C stable, experiment continues</p>
+      </div>
+    </div>
+  </div>
+  <div class="result">
+    <div class="result-box">
+      <p class="result-title">Outcome</p>
+      <p class="result-item">Not retry (same overshoot)</p>
+      <p class="result-item">Not abort (sample lost)</p>
+      <p class="result-item">Semantic recovery</p>
+      <p class="result-item">Sample preserved</p>
+    </div>
+    <div class="metrics-box">
+      <div class="metrics-title-wrap">
+        <p class="metrics-title">Captured Metrics</p>
+      </div>
+      <div class="metric-row">
+        <p class="metric-name">signature_mode</p>
+        <p class="metric-value">drift</p>
+      </div>
+      <div class="metric-row">
+        <p class="metric-name">decision_kind</p>
+        <p class="metric-value">degrade</p>
+      </div>
+      <div class="metric-row">
+        <p class="metric-name">recovery_steps</p>
+        <p class="metric-value">3</p>
+      </div>
+      <div class="metric-row">
+        <p class="metric-name">time_to_recover</p>
+        <p class="metric-value">11.0s</p>
+      </div>
+      <div class="metric-row">
+        <p class="metric-name">sample_status</p>
+        <p class="metric-value">compromised</p>
+      </div>
+      <div class="metric-row">
+        <p class="metric-name">original_target</p>
+        <p class="metric-value">120.0°C</p>
+      </div>
+      <div class="metric-row">
+        <p class="metric-name">degraded_target</p>
+        <p class="metric-value">110.0°C</p>
+      </div>
+    </div>
+  </div>
+</div>
+</body>
+</html>

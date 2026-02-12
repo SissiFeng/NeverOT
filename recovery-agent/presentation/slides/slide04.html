@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+html { background: #ffffff; }
+body {
+  width: 720pt; height: 405pt; margin: 0; padding: 0;
+  background: #ffffff; font-family: Arial, sans-serif;
+  display: flex; flex-direction: column;
+}
+.header {
+  background: #1C2833; padding: 20pt 30pt; margin: 0;
+}
+.header h1 {
+  color: #ffffff; font-size: 22pt; margin: 0; font-weight: bold;
+}
+.content {
+  padding: 25pt 35pt; flex: 1;
+}
+.comparison {
+  display: flex; gap: 25pt;
+}
+.col {
+  flex: 1;
+}
+.col-title-wrap {
+  margin-bottom: 15pt; padding-bottom: 8pt;
+  border-bottom: 2pt solid #E74C3C;
+}
+.col-title-wrap.missing {
+  border-bottom-color: #667eea;
+}
+.col-title {
+  font-size: 13pt; font-weight: bold; margin: 0;
+}
+.existing { color: #E74C3C; }
+.missing { color: #667eea; }
+.item {
+  background: #F4F6F6; padding: 10pt 12pt; margin-bottom: 8pt;
+}
+.item p {
+  color: #2E4053; font-size: 11pt; margin: 0; line-height: 1.4;
+}
+.item-title {
+  font-weight: bold; color: #1C2833;
+}
+.conclusion {
+  background: #1C2833; padding: 15pt 20pt; margin-top: 15pt;
+}
+.conclusion p {
+  color: #ffffff; font-size: 12pt; margin: 0;
+}
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>What Existing Systems Miss</h1>
+</div>
+<div class="content">
+  <div class="comparison">
+    <div class="col">
+      <div class="col-title-wrap">
+        <p class="col-title existing">Current Agent Recovery</p>
+      </div>
+      <div class="item"><p>Retry the same action</p></div>
+      <div class="item"><p>Change parameters randomly</p></div>
+      <div class="item"><p>Switch to different tool</p></div>
+    </div>
+    <div class="col">
+      <div class="col-title-wrap missing">
+        <p class="col-title missing">Missing Physical Semantics</p>
+      </div>
+      <div class="item"><p><span class="item-title">Irreversibility</span> - actions cannot be undone</p></div>
+      <div class="item"><p><span class="item-title">Sample Status</span> - material may be compromised</p></div>
+      <div class="item"><p><span class="item-title">Safety Envelope</span> - physical limits exist</p></div>
+    </div>
+  </div>
+  <div class="conclusion">
+    <p>Tool calling is not execution semantics. Retry is not recovery.</p>
+  </div>
+</div>
+</body>
+</html>
