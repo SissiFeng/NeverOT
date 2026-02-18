@@ -15,7 +15,9 @@ ROBOT_MOVE_SPEED = 200
 class ActionDispatcher:
     """Dispatches workflow actions to appropriate hardware controllers"""
 
-    def __init__(self, robot, squidstat, relay, plc, cleanup=None, sample_preparator=None, ssh_streamer=None):
+    def __init__(self, robot, squidstat, relay, plc, cleanup=None,
+                 sample_preparator=None, ssh_streamer=None,
+                 ph_sensor=None, flex_bridge=None):
         """
         Initialize dispatcher with hardware controllers
 
@@ -27,6 +29,8 @@ class ActionDispatcher:
             cleanup: CleanupWorkflows instance (optional)
             sample_preparator: SamplePreparator instance (optional)
             ssh_streamer: SshDataStreamer instance (optional)
+            ph_sensor: PhSensorController instance (optional)
+            flex_bridge: FlexBridge instance (optional)
         """
         self.robot = robot
         self.squidstat = squidstat
@@ -35,10 +39,15 @@ class ActionDispatcher:
         self.cleanup = cleanup
         self.sample_preparator = sample_preparator
         self.ssh_streamer = ssh_streamer
+        self.ph_sensor = ph_sensor
+        self.flex_bridge = flex_bridge
 
         # Track labware IDs (name -> ID mapping)
         self.labware_ids = {}
         self._csv_progress = {}
+
+        # Tool holder configs: holder_name -> ToolHolderConfig
+        self._tool_holder_configs: Dict[str, Any] = {}
 
         # Map action types to handler methods
         self.action_handlers = {
@@ -75,12 +84,54 @@ class ActionDispatcher:
             # Cleanup (high level)
             'cleanup.run_full': self._handle_cleanup_run_full,
 
+            # Cleaning skill handlers (per-device)
+            'cleanup.ultrasonic_water': self._handle_clean_ultrasonic_water,
+            'cleanup.ultrasonic_acid': self._handle_clean_ultrasonic_acid,
+            'cleanup.water_flush': self._handle_clean_water_flush,
+            'cleanup.electrode_clean': self._handle_clean_electrode,
+
             # Sample preparation (CSV-driven additives)
             'sample.prepare_from_csv': self._handle_sample_prepare_from_csv,
 
             # SSH Actions
             'ssh.start_stream': self._handle_ssh_start,
             'ssh.stop_stream': self._handle_ssh_stop,
+
+            # pH Sensor Actions
+            'ph_sensor.dispense_strip': self._handle_ph_dispense_strip,
+            'ph_sensor.read_value': self._handle_ph_read_value,
+            'ph_sensor.calibrate': self._handle_ph_calibrate,
+
+            # Flex Bridge Actions (SSH-based Flex robot)
+            'flex.home': self._handle_flex_home,
+            'flex.load_labware': self._handle_flex_load_labware,
+            'flex.load_instrument': self._handle_flex_load_instrument,
+            'flex.load_module': self._handle_flex_load_module,
+            'flex.load_trash_bin': self._handle_flex_load_trash_bin,
+            'flex.pick_up_tip': self._handle_flex_pick_up_tip,
+            'flex.return_tip': self._handle_flex_return_tip,
+            'flex.drop_tip': self._handle_flex_drop_tip,
+            'flex.aspirate': self._handle_flex_aspirate,
+            'flex.dispense': self._handle_flex_dispense,
+            'flex.blow_out': self._handle_flex_blow_out,
+            'flex.touch_tip': self._handle_flex_touch_tip,
+            'flex.prepare_aspirate': self._handle_flex_prepare_aspirate,
+            'flex.transfer': self._handle_flex_transfer,
+            'flex.mix': self._handle_flex_mix,
+            'flex.get_location': self._handle_flex_get_location,
+            'flex.move_to_pip': self._handle_flex_move_to_pip,
+            'flex.set_speed': self._handle_flex_set_speed,
+            'flex.delay': self._handle_flex_delay,
+            'flex.invoke': self._handle_flex_invoke,
+            'flex.move_labware': self._handle_flex_move_labware,
+            'flex.reset_tip_index': self._handle_flex_reset_tip_index,
+            # Flex Heater-Shaker module
+            'flex.hs_latch_open': self._handle_flex_hs_latch_open,
+            'flex.hs_latch_close': self._handle_flex_hs_latch_close,
+            'flex.set_rpm': self._handle_flex_set_rpm,
+            'flex.set_temp': self._handle_flex_set_temp,
+            'flex.pause': self._handle_flex_pause,
+            'flex.resume': self._handle_flex_resume,
 
             # Utility actions
             'wait': self._handle_wait,
@@ -669,6 +720,111 @@ class ActionDispatcher:
             raise ValueError("Cleanup handler not configured in dispatcher")
         return self.cleanup.run_full_cleanup()
 
+    # ========== Cleaning Skill Handlers ==========
+
+    def _handle_clean_ultrasonic_water(self, duration_ms: int = 10000, **kwargs):
+        """Run ultrasonic bath water chamber cleaning"""
+        try:
+            logging.info(f"[CLEAN] Ultrasonic water clean: {duration_ms}ms")
+            self.plc.setUltrasonicOnTimer(unit_number=1, duration_ms=duration_ms)
+            return True
+        except Exception as e:
+            logging.error(f"[CLEAN] Ultrasonic water clean failed: {e}")
+            raise
+
+    def _handle_clean_ultrasonic_acid(self, duration_ms: int = 10000, **kwargs):
+        """Run ultrasonic bath acid chamber cleaning"""
+        try:
+            logging.info(f"[CLEAN] Ultrasonic acid clean: {duration_ms}ms")
+            self.plc.setUltrasonicOnTimer(unit_number=2, duration_ms=duration_ms)
+            return True
+        except Exception as e:
+            logging.error(f"[CLEAN] Ultrasonic acid clean failed: {e}")
+            raise
+
+    def _handle_clean_water_flush(self, duration_ms: int = 5000, pump_id: str = "water_pump", **kwargs):
+        """Flush with DI water"""
+        try:
+            logging.info(f"[CLEAN] Water flush: {duration_ms}ms via {pump_id}")
+            self.plc.set_pump_on_timer(pump_number=1, duration_ms=duration_ms)
+            return True
+        except Exception as e:
+            logging.error(f"[CLEAN] Water flush failed: {e}")
+            raise
+
+    def _handle_clean_electrode(self, acid_duration_ms: int = 8000, water_duration_ms: int = 5000, **kwargs):
+        """Electrode cleaning: acid ultrasonic + water rinse"""
+        try:
+            logging.info(f"[CLEAN] Electrode clean: acid {acid_duration_ms}ms + water {water_duration_ms}ms")
+            # Acid chamber
+            self.plc.setUltrasonicOnTimer(unit_number=2, duration_ms=acid_duration_ms)
+            # Water rinse
+            self.plc.setUltrasonicOnTimer(unit_number=1, duration_ms=water_duration_ms)
+            return True
+        except Exception as e:
+            logging.error(f"[CLEAN] Electrode clean failed: {e}")
+            raise
+
+    # ========== Tool Holder Support ==========
+
+    def register_tool_holder(self, config) -> None:
+        """Register a ToolHolderConfig for offset-aware moves.
+
+        Args:
+            config: ToolHolderConfig instance
+        """
+        self._tool_holder_configs[config.holder_name] = config
+        logging.info(f"[TOOL_HOLDER] Registered '{config.holder_name}' "
+                     f"with {len(config.positions)} positions")
+
+    def move_to_tool_position(self, holder_name: str, position_name: str,
+                               pipette: str, speed: int = 200, **kwargs) -> bool:
+        """Move to a named position on a registered tool holder.
+
+        Resolves the well reference and applies the configured offsets.
+
+        Args:
+            holder_name: Registered tool holder name
+            position_name: Position name within the holder
+            pipette: Pipette name to use
+            speed: Movement speed
+
+        Returns:
+            True on success
+
+        Raises:
+            ValueError: If holder or position is not found
+        """
+        config = self._tool_holder_configs.get(holder_name)
+        if config is None:
+            raise ValueError(f"Tool holder not registered: {holder_name}")
+
+        pos = config.get_position(position_name)
+        if pos is None:
+            raise ValueError(
+                f"Position '{position_name}' not found in holder '{holder_name}'. "
+                f"Available: {config.position_names()}"
+            )
+
+        labware = config.labware_name
+        labware_id = self._resolve_labware_id(labware)
+
+        self.robot.move_to_well(
+            labware_id=labware_id,
+            well_name=pos.well_name,
+            pipette_name=pipette,
+            offset_start='top',
+            offset_x=pos.offset_x,
+            offset_y=pos.offset_y,
+            offset_z=pos.offset_z,
+            speed=speed,
+        )
+        logging.info(
+            f"[TOOL_HOLDER] Moved to '{position_name}' on '{holder_name}' "
+            f"(well={pos.well_name}, offset=({pos.offset_x}, {pos.offset_y}, {pos.offset_z}))"
+        )
+        return True
+
     # ========== Sample Preparation (CSV) ==========
 
     def _handle_sample_prepare_from_csv(self, proposal_file: str = "additive_proposal.csv", row_index: int = None, **kwargs):
@@ -779,6 +935,460 @@ class ActionDispatcher:
                 return False
         else:
             logging.warning("[SSH] Streamer not available (action skipped)")
+            return False
+
+    # ========== pH Sensor Action Handlers ==========
+
+    def _handle_ph_dispense_strip(self, **kwargs):
+        """Advance/eject a pH indicator strip"""
+        if self.ph_sensor:
+            try:
+                result = self.ph_sensor.dispense_strip()
+                return result
+            except Exception as e:
+                logging.error(f"[pH] Failed to dispense strip: {e}")
+                return False
+        else:
+            logging.warning("[pH] Sensor not available (action skipped)")
+            return False
+
+    def _handle_ph_read_value(self, well: str = "A1", repeat: int = None,
+                              settle_time: float = None, **kwargs):
+        """Read pH from indicator strip"""
+        if self.ph_sensor:
+            try:
+                result = self.ph_sensor.read_ph(
+                    well=well, repeat=repeat, settle_time=settle_time
+                )
+                logging.info(
+                    f"[pH] Well {well}: pH={result.get('ph_mean', 'N/A')}"
+                )
+                return result
+            except Exception as e:
+                logging.error(f"[pH] Failed to read pH: {e}")
+                return {"ph_mean": None, "ph_std": None, "well": well, "error": str(e)}
+        else:
+            logging.warning("[pH] Sensor not available (action skipped)")
+            return {"ph_mean": None, "ph_std": None, "well": well, "error": "sensor_unavailable"}
+
+    def _handle_ph_calibrate(self, known_ph: float = 7.0, well: str = "A1", **kwargs):
+        """Run pH calibration against a known standard"""
+        if self.ph_sensor:
+            try:
+                result = self.ph_sensor.calibrate(known_ph=known_ph, well=well)
+                return result
+            except Exception as e:
+                logging.error(f"[pH] Calibration failed: {e}")
+                return {"success": False, "error": str(e)}
+        else:
+            logging.warning("[pH] Sensor not available (action skipped)")
+            return {"success": False, "error": "sensor_unavailable"}
+
+    # ========== Flex Bridge Action Handlers ==========
+
+    def _handle_flex_home(self, **kwargs):
+        """Home the Flex robot"""
+        if self.flex_bridge:
+            try:
+                return self.flex_bridge.home()
+            except Exception as e:
+                logging.error(f"[Flex] Home failed: {e}")
+                return False
+        else:
+            logging.warning("[Flex] Bridge not available (action skipped)")
+            return False
+
+    def _handle_flex_load_labware(self, nickname: str, loadname: str,
+                                   location: str, ot_default: bool = True,
+                                   config: dict = None, json_path: str = None,
+                                   **kwargs):
+        """Load labware on Flex deck"""
+        if not self.flex_bridge:
+            logging.warning("[Flex] Bridge not available (action skipped)")
+            return False
+        try:
+            if json_path:
+                return self.flex_bridge.load_labware_from_json(
+                    nickname=nickname, json_path=json_path, location=location
+                )
+            return self.flex_bridge.load_labware({
+                "nickname": nickname,
+                "loadname": loadname,
+                "location": location,
+                "ot_default": ot_default,
+                "config": config or {},
+            })
+        except Exception as e:
+            logging.error(f"[Flex] Failed to load labware '{nickname}': {e}")
+            return False
+
+    def _handle_flex_load_instrument(self, nickname: str, instrument_name: str,
+                                      mount: str = "left",
+                                      tip_racks: list = None,
+                                      ot_default: bool = True, **kwargs):
+        """Load instrument on Flex"""
+        if not self.flex_bridge:
+            logging.warning("[Flex] Bridge not available (action skipped)")
+            return False
+        try:
+            return self.flex_bridge.load_instrument({
+                "nickname": nickname,
+                "instrument_name": instrument_name,
+                "mount": mount,
+                "tip_racks": tip_racks or [],
+                "ot_default": ot_default,
+            })
+        except Exception as e:
+            logging.error(f"[Flex] Failed to load instrument '{nickname}': {e}")
+            return False
+
+    def _handle_flex_load_trash_bin(self, **kwargs):
+        """Load Flex trash bin"""
+        if not self.flex_bridge:
+            logging.warning("[Flex] Bridge not available (action skipped)")
+            return False
+        try:
+            return self.flex_bridge.load_trash_bin()
+        except Exception as e:
+            logging.error(f"[Flex] Failed to load trash bin: {e}")
+            return False
+
+    def _handle_flex_pick_up_tip(self, pip_name: str = "p1000",
+                                  location: str = None, **kwargs):
+        """Pick up tip on Flex"""
+        if not self.flex_bridge:
+            logging.warning("[Flex] Bridge not available (action skipped)")
+            return False
+        try:
+            return self.flex_bridge.pick_up_tip(pip_name=pip_name, location=location)
+        except Exception as e:
+            logging.error(f"[Flex] pick_up_tip failed: {e}")
+            return False
+
+    def _handle_flex_drop_tip(self, pip_name: str = "p1000", **kwargs):
+        """Drop tip on Flex"""
+        if not self.flex_bridge:
+            logging.warning("[Flex] Bridge not available (action skipped)")
+            return False
+        try:
+            return self.flex_bridge.drop_tip(pip_name=pip_name)
+        except Exception as e:
+            logging.error(f"[Flex] drop_tip failed: {e}")
+            return False
+
+    def _handle_flex_aspirate(self, pip_name: str = "p1000", volume: float = 0,
+                               labware: str = None, well: str = None,
+                               top: float = 0, bottom: float = 0,
+                               x_offset: float = 0, y_offset: float = 0,
+                               **kwargs):
+        """Aspirate on Flex (optionally set location first)"""
+        if not self.flex_bridge:
+            logging.warning("[Flex] Bridge not available (action skipped)")
+            return False
+        try:
+            if labware and well:
+                self.flex_bridge.get_location(
+                    labware, well, top=top, bottom=bottom,
+                    x_offset=x_offset, y_offset=y_offset,
+                )
+            return self.flex_bridge.aspirate(pip_name=pip_name, volume=volume)
+        except Exception as e:
+            logging.error(f"[Flex] aspirate failed: {e}")
+            return False
+
+    def _handle_flex_dispense(self, pip_name: str = "p1000", volume: float = 0,
+                               labware: str = None, well: str = None,
+                               top: float = 0, bottom: float = 0,
+                               x_offset: float = 0, y_offset: float = 0,
+                               push_out: float = None, **kwargs):
+        """Dispense on Flex (optionally set location first)"""
+        if not self.flex_bridge:
+            logging.warning("[Flex] Bridge not available (action skipped)")
+            return False
+        try:
+            if labware and well:
+                self.flex_bridge.get_location(
+                    labware, well, top=top, bottom=bottom,
+                    x_offset=x_offset, y_offset=y_offset,
+                )
+            return self.flex_bridge.dispense(
+                pip_name=pip_name, volume=volume, push_out=push_out,
+            )
+        except Exception as e:
+            logging.error(f"[Flex] dispense failed: {e}")
+            return False
+
+    def _handle_flex_blow_out(self, pip_name: str = "p1000", **kwargs):
+        """Blow out remaining liquid on Flex"""
+        if not self.flex_bridge:
+            logging.warning("[Flex] Bridge not available (action skipped)")
+            return False
+        try:
+            return self.flex_bridge.blow_out(pip_name=pip_name)
+        except Exception as e:
+            logging.error(f"[Flex] blow_out failed: {e}")
+            return False
+
+    def _handle_flex_touch_tip(self, pip_name: str = "p1000",
+                                labware: str = "", well: str = "A1",
+                                radius: float = 1.0, v_offset: float = -1.0,
+                                **kwargs):
+        """Touch tip to well sides on Flex"""
+        if not self.flex_bridge:
+            logging.warning("[Flex] Bridge not available (action skipped)")
+            return False
+        try:
+            return self.flex_bridge.touch_tip(
+                pip_name=pip_name, labware_nickname=labware,
+                position=well, radius=radius, v_offset=v_offset,
+            )
+        except Exception as e:
+            logging.error(f"[Flex] touch_tip failed: {e}")
+            return False
+
+    def _handle_flex_prepare_aspirate(self, pip_name: str = "p1000", **kwargs):
+        """Prepare pipette for aspiration on Flex"""
+        if not self.flex_bridge:
+            logging.warning("[Flex] Bridge not available (action skipped)")
+            return False
+        try:
+            return self.flex_bridge.prepare_aspirate(pip_name=pip_name)
+        except Exception as e:
+            logging.error(f"[Flex] prepare_aspirate failed: {e}")
+            return False
+
+    def _handle_flex_return_tip(self, pip_name: str = "p1000", **kwargs):
+        """Return tip to original rack position on Flex"""
+        if not self.flex_bridge:
+            logging.warning("[Flex] Bridge not available (action skipped)")
+            return False
+        try:
+            return self.flex_bridge.return_tip(pip_name=pip_name)
+        except Exception as e:
+            logging.error(f"[Flex] return_tip failed: {e}")
+            return False
+
+    def _handle_flex_transfer(self, pip_name: str = "p1000", volume: float = 0,
+                               source_labware: str = "", source_well: str = "A1",
+                               dest_labware: str = "", dest_well: str = "A1",
+                               source_top: float = 0, source_bottom: float = 0,
+                               dest_top: float = 0, dest_bottom: float = 0,
+                               source_x_offset: float = 0, source_y_offset: float = 0,
+                               dest_x_offset: float = 0, dest_y_offset: float = 1,
+                               push_out: float = None, **kwargs):
+        """High-level transfer on Flex"""
+        if not self.flex_bridge:
+            logging.warning("[Flex] Bridge not available (action skipped)")
+            return False
+        try:
+            return self.flex_bridge.transfer(
+                pip_name=pip_name, volume=volume,
+                source_labware=source_labware, source_well=source_well,
+                dest_labware=dest_labware, dest_well=dest_well,
+                source_top=source_top, source_bottom=source_bottom,
+                dest_top=dest_top, dest_bottom=dest_bottom,
+                source_x_offset=source_x_offset, source_y_offset=source_y_offset,
+                dest_x_offset=dest_x_offset, dest_y_offset=dest_y_offset,
+                push_out=push_out,
+            )
+        except Exception as e:
+            logging.error(f"[Flex] transfer failed: {e}")
+            return False
+
+    def _handle_flex_mix(self, pip_name: str = "p1000", labware: str = "",
+                          well: str = "A1", volume: float = 300,
+                          cycles: int = 3, top: float = 0, bottom: float = 0,
+                          x_offset: float = 0, y_offset: float = 1, **kwargs):
+        """Mix at a well on Flex"""
+        if not self.flex_bridge:
+            logging.warning("[Flex] Bridge not available (action skipped)")
+            return False
+        try:
+            return self.flex_bridge.mix(
+                pip_name=pip_name, labware=labware, well=well,
+                volume=volume, cycles=cycles,
+                top=top, bottom=bottom,
+                x_offset=x_offset, y_offset=y_offset,
+            )
+        except Exception as e:
+            logging.error(f"[Flex] mix failed: {e}")
+            return False
+
+    def _handle_flex_get_location(self, labware: str, well: str = "A1",
+                                   top: float = 0, bottom: float = 0,
+                                   center: float = 0, x_offset: float = 0,
+                                   y_offset: float = 0, **kwargs):
+        """Set target location on Flex"""
+        if not self.flex_bridge:
+            logging.warning("[Flex] Bridge not available (action skipped)")
+            return False
+        try:
+            return self.flex_bridge.get_location(
+                labware, position=well, top=top, bottom=bottom,
+                center=center, x_offset=x_offset, y_offset=y_offset,
+            )
+        except Exception as e:
+            logging.error(f"[Flex] get_location failed: {e}")
+            return False
+
+    def _handle_flex_move_to_pip(self, pip_name: str = "p1000", **kwargs):
+        """Move pipette to previously set location on Flex"""
+        if not self.flex_bridge:
+            logging.warning("[Flex] Bridge not available (action skipped)")
+            return False
+        try:
+            return self.flex_bridge.move_to_pip(pip_name=pip_name)
+        except Exception as e:
+            logging.error(f"[Flex] move_to_pip failed: {e}")
+            return False
+
+    def _handle_flex_set_speed(self, pip_name: str = "p1000",
+                                speed: float = 400, **kwargs):
+        """Set pipette movement speed on Flex"""
+        if not self.flex_bridge:
+            logging.warning("[Flex] Bridge not available (action skipped)")
+            return False
+        try:
+            return self.flex_bridge.set_speed(pip_name=pip_name, speed=speed)
+        except Exception as e:
+            logging.error(f"[Flex] set_speed failed: {e}")
+            return False
+
+    def _handle_flex_delay(self, seconds: float = 0, minutes: float = 0,
+                            **kwargs):
+        """Insert a timed delay on Flex robot"""
+        if not self.flex_bridge:
+            logging.warning("[Flex] Bridge not available (action skipped)")
+            return False
+        try:
+            return self.flex_bridge.delay(seconds=seconds, minutes=minutes)
+        except Exception as e:
+            logging.error(f"[Flex] delay failed: {e}")
+            return False
+
+    def _handle_flex_invoke(self, code: str = "", **kwargs):
+        """Execute raw Python code on Flex via SSH"""
+        if not self.flex_bridge:
+            logging.warning("[Flex] Bridge not available (action skipped)")
+            return None
+        try:
+            return self.flex_bridge.invoke(code)
+        except Exception as e:
+            logging.error(f"[Flex] invoke failed: {e}")
+            return None
+
+    def _handle_flex_load_module(self, nickname: str, module_name: str,
+                                  location: str, adapter: str = "", **kwargs):
+        """Load a hardware module on Flex (e.g. heater-shaker)"""
+        if not self.flex_bridge:
+            logging.warning("[Flex] Bridge not available (action skipped)")
+            return False
+        try:
+            return self.flex_bridge.load_module({
+                "nickname": nickname,
+                "module_name": module_name,
+                "location": location,
+                "adapter": adapter,
+            })
+        except Exception as e:
+            logging.error(f"[Flex] load_module failed: {e}")
+            return False
+
+    def _handle_flex_move_labware(self, labware_nickname: str,
+                                   new_location: str, **kwargs):
+        """Move labware using the Flex gripper"""
+        if not self.flex_bridge:
+            logging.warning("[Flex] Bridge not available (action skipped)")
+            return False
+        try:
+            return self.flex_bridge.move_labware_w_gripper(
+                labware_nickname=labware_nickname,
+                new_location=new_location,
+            )
+        except Exception as e:
+            logging.error(f"[Flex] move_labware failed: {e}")
+            return False
+
+    def _handle_flex_reset_tip_index(self, pip_name: str = None, **kwargs):
+        """Reset tip index counter on Flex"""
+        if not self.flex_bridge:
+            logging.warning("[Flex] Bridge not available (action skipped)")
+            return False
+        try:
+            self.flex_bridge.reset_tip_index(pip_name=pip_name)
+            return True
+        except Exception as e:
+            logging.error(f"[Flex] reset_tip_index failed: {e}")
+            return False
+
+    # ========== Flex Heater-Shaker Handlers ==========
+
+    def _handle_flex_hs_latch_open(self, nickname: str = "hs", **kwargs):
+        """Open heater-shaker latch on Flex"""
+        if not self.flex_bridge:
+            logging.warning("[Flex] Bridge not available (action skipped)")
+            return False
+        try:
+            return self.flex_bridge.hs_latch_open(nickname=nickname)
+        except Exception as e:
+            logging.error(f"[Flex] hs_latch_open failed: {e}")
+            return False
+
+    def _handle_flex_hs_latch_close(self, nickname: str = "hs", **kwargs):
+        """Close heater-shaker latch on Flex"""
+        if not self.flex_bridge:
+            logging.warning("[Flex] Bridge not available (action skipped)")
+            return False
+        try:
+            return self.flex_bridge.hs_latch_close(nickname=nickname)
+        except Exception as e:
+            logging.error(f"[Flex] hs_latch_close failed: {e}")
+            return False
+
+    def _handle_flex_set_rpm(self, nickname: str = "hs", rpm: int = 0,
+                              **kwargs):
+        """Set heater-shaker shake speed on Flex"""
+        if not self.flex_bridge:
+            logging.warning("[Flex] Bridge not available (action skipped)")
+            return False
+        try:
+            return self.flex_bridge.set_rpm(nickname=nickname, rpm=rpm)
+        except Exception as e:
+            logging.error(f"[Flex] set_rpm failed: {e}")
+            return False
+
+    def _handle_flex_set_temp(self, nickname: str = "hs", temp: float = 0,
+                               **kwargs):
+        """Set heater-shaker temperature on Flex"""
+        if not self.flex_bridge:
+            logging.warning("[Flex] Bridge not available (action skipped)")
+            return False
+        try:
+            return self.flex_bridge.set_temp(nickname=nickname, temp=temp)
+        except Exception as e:
+            logging.error(f"[Flex] set_temp failed: {e}")
+            return False
+
+    def _handle_flex_pause(self, **kwargs):
+        """Pause Flex protocol execution"""
+        if not self.flex_bridge:
+            logging.warning("[Flex] Bridge not available (action skipped)")
+            return False
+        try:
+            return self.flex_bridge.pause()
+        except Exception as e:
+            logging.error(f"[Flex] pause failed: {e}")
+            return False
+
+    def _handle_flex_resume(self, **kwargs):
+        """Resume Flex protocol execution"""
+        if not self.flex_bridge:
+            logging.warning("[Flex] Bridge not available (action skipped)")
+            return False
+        try:
+            return self.flex_bridge.resume()
+        except Exception as e:
+            logging.error(f"[Flex] resume failed: {e}")
             return False
 
     # ========== Utility Action Handlers ==========
