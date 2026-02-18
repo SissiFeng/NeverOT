@@ -23,7 +23,7 @@ class RelayController:
         Initialize relay controller
 
         Args:
-            port: COM port for the relay (e.g., 'COM11')
+            port: Serial port for the relay (e.g., 'COM11' on Windows, '/dev/ttyUSB0' on Linux)
             baudrate: Communication baudrate (default: 9600)
             timeout: Serial timeout in seconds
         """
