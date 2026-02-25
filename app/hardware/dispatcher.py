@@ -150,6 +150,25 @@ class ActionDispatcher:
             if hasattr(handler, 'flush'):
                 handler.flush()
 
+    def register_handler(self, primitive_name: str, handler: Any) -> None:
+        """Dynamically register a handler for a new primitive (hot-load path).
+
+        Allows newly onboarded instrument controllers to register their
+        primitives at runtime without requiring a server restart.
+        The action_handlers dict is extended in-place so existing dispatches
+        continue to work.
+
+        Args:
+            primitive_name: Action key, e.g. ``"uv_vis.measure_spectrum"``
+            handler: Callable that implements the primitive
+        """
+        if primitive_name in self.action_handlers:
+            logging.warning(
+                "register_handler: overwriting existing handler for %s", primitive_name
+            )
+        self.action_handlers[primitive_name] = handler
+        logging.info("Registered handler for primitive: %s", primitive_name)
+
     def dispatch(self, action: str, params: Optional[Dict[str, Any]] = None) -> Any:
         """
         Dispatch an action to the appropriate handler
