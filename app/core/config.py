@@ -47,6 +47,23 @@ class Settings:
             os.getenv("MAX_CONCURRENT_WORKERS", str(max(2, min(8, os.cpu_count() or 4))))
         )
         self.campaign_poll_seconds = float(os.getenv("CAMPAIGN_POLL_SECONDS", "5"))
+        # ---- RL strategy router (decision-layer RL integration) ----
+        # Defaults keep the orchestrator on the safe rule-based path.
+        self.strategy_router_mode: str = os.getenv(
+            "STRATEGY_ROUTER_MODE", "rule_based"
+        ).lower()  # rule_based | rl | ab_test
+        self.strategy_router_rl_backend: str = os.getenv(
+            "STRATEGY_RL_BACKEND", "dqn"
+        ).lower()  # dqn | ppo | q_learning
+        self.strategy_router_ab_fraction: float = float(
+            os.getenv("STRATEGY_AB_RL_FRACTION", "0.2")
+        )
+        self.strategy_router_confidence_threshold: float = float(
+            os.getenv("STRATEGY_RL_CONFIDENCE_THRESHOLD", "0.3")
+        )
+        self.strategy_router_explore: bool = os.getenv(
+            "STRATEGY_RL_EXPLORE", "true"
+        ).lower() in ("true", "1", "yes")
         self.lock_ttl_seconds = int(os.getenv("LOCK_TTL_SECONDS", "90"))
         self.default_firmware_version = os.getenv("DEFAULT_FIRMWARE_VERSION", "sim-fw-1.0.0")
         self.default_calibration_id = os.getenv("DEFAULT_CALIBRATION_ID", "sim-cal-2026-01")

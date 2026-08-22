@@ -532,8 +532,10 @@ class DQNStrategySelector:
         self.config = config
         self.ACTIONS = ACTIONS
 
-        # State dimension from RLState (15 features)
-        self.state_dim = 15
+        from app.services.rl_strategy_selector import RLState
+
+        # State dimension from RLState (37 features)
+        self.state_dim = RLState.n_features()
         self.action_dim = len(ACTIONS)
 
         # Create DQN agent

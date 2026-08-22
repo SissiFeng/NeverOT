@@ -22,6 +22,7 @@ nothing in the live decision path calls it until it is explicitly wired in.
 """
 from __future__ import annotations
 
+import math
 import random
 from collections import Counter
 from dataclasses import dataclass
@@ -31,8 +32,12 @@ from app.optimization.arbitration_config import ArbitrationConfig
 from app.optimization.decision_policy import _bounds_violation, _signature
 from app.optimization.schemas import (
     CandidatePool as ArbitrationCandidatePool,
+)
+from app.optimization.schemas import (
     CandidateSuggestion,
     OptimizationRequest,
+)
+from app.optimization.schemas import (
     PooledCandidate as ArbitrationPooledCandidate,
 )
 from app.services.candidate_gen import sample_lhs
@@ -308,6 +313,79 @@ def _explicit_action(suggestion: CandidateSuggestion, index: int) -> str | None:
     return None
 
 
+def _candidate_meta(suggestion: CandidateSuggestion, index: int) -> dict[str, Any]:
+    """Return a defensive copy of aligned per-candidate provider metadata."""
+    meta: dict[str, Any] = {}
+    if index < len(suggestion.per_candidate):
+        candidate_meta = suggestion.per_candidate[index]
+        if isinstance(candidate_meta, dict):
+            meta.update(candidate_meta)
+    meta["provider_provenance"] = {
+        "source": suggestion.source,
+        "algorithm": suggestion.algorithm,
+        "confidence": suggestion.confidence,
+        "rationale": suggestion.rationale,
+        "diagnostics": dict(suggestion.diagnostics),
+        "fingerprint": dict(suggestion.fingerprint),
+        "seed": suggestion.seed,
+    }
+    return meta
+
+
+def _finite_candidate_metric(
+    meta: dict[str, Any],
+    key: str,
+    *,
+    unit_interval: bool = False,
+) -> float | None:
+    """Accept only finite provider metrics; clamp normalized diagnostics."""
+    value = meta.get(key)
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(numeric):
+        return None
+    if unit_interval:
+        return min(1.0, max(0.0, numeric))
+    return numeric
+
+
+def _pooled_candidate(
+    suggestion: CandidateSuggestion,
+    index: int,
+    params: dict[str, Any],
+    *,
+    source: str,
+    default_action: str,
+) -> ArbitrationPooledCandidate:
+    """Translate one provider candidate without trusting unvalidated metrics."""
+    meta = _candidate_meta(suggestion, index)
+    rationale = meta.get("rationale") or suggestion.rationale
+    return ArbitrationPooledCandidate(
+        params=dict(params),
+        source=source,
+        source_action=_explicit_action(suggestion, index) or default_action,
+        generator_backend=suggestion.algorithm,
+        expected_improvement=_finite_candidate_metric(meta, "expected_improvement"),
+        objective_opportunity=_finite_candidate_metric(
+            meta, "objective_opportunity", unit_interval=True
+        ),
+        uncertainty=_finite_candidate_metric(
+            meta, "uncertainty", unit_interval=True
+        ),
+        novelty=_finite_candidate_metric(meta, "novelty", unit_interval=True),
+        constraint_margin=_finite_candidate_metric(
+            meta, "constraint_margin", unit_interval=True
+        ),
+        info_gain=_finite_candidate_metric(meta, "info_gain", unit_interval=True),
+        rationale=str(rationale),
+        diagnostics=meta,
+    )
+
+
 class CandidatePoolBuilder:
     """Build a concrete arbitration pool from provider suggestions."""
 
@@ -333,12 +411,12 @@ class CandidatePoolBuilder:
         if nexus_suggestion is not None and nexus_suggestion.candidates:
             for i, params in enumerate(nexus_suggestion.candidates):
                 candidates.append(
-                    ArbitrationPooledCandidate(
-                        params=dict(params),
+                    _pooled_candidate(
+                        nexus_suggestion,
+                        i,
+                        params,
                         source="nexus",
-                        source_action=_explicit_action(nexus_suggestion, i) or authority_action,
-                        generator_backend=nexus_suggestion.algorithm,
-                        rationale=nexus_suggestion.rationale,
+                        default_action=authority_action,
                     )
                 )
             used.append("nexus")
@@ -351,14 +429,14 @@ class CandidatePoolBuilder:
             trace.append("nexus: no suggestion (dropped)")
 
         if cfg.include_local_baseline and local_suggestion is not None and local_suggestion.candidates:
-            for params in local_suggestion.candidates:
+            for i, params in enumerate(local_suggestion.candidates):
                 candidates.append(
-                    ArbitrationPooledCandidate(
-                        params=dict(params),
+                    _pooled_candidate(
+                        local_suggestion,
+                        i,
+                        params,
                         source="local",
-                        source_action=authority_action,
-                        generator_backend=local_suggestion.algorithm,
-                        rationale=local_suggestion.rationale,
+                        default_action=authority_action,
                     )
                 )
             used.append("local")
@@ -404,12 +482,12 @@ class CandidatePoolBuilder:
                 continue
             for i, params in enumerate(sug.candidates):
                 candidates.append(
-                    ArbitrationPooledCandidate(
-                        params=dict(params),
+                    _pooled_candidate(
+                        sug,
+                        i,
+                        params,
                         source=sug.source,
-                        source_action=_explicit_action(sug, i) or authority_action,
-                        generator_backend=sug.algorithm,
-                        rationale=sug.rationale,
+                        default_action=authority_action,
                     )
                 )
             used.append(sug.source)

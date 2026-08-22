@@ -63,6 +63,10 @@ class PooledCandidate:
     source_action: str  # "explore" | "exploit" | "refine" | "stabilize"
     generator_backend: str = ""  # audit: which backend produced it
     expected_improvement: float | None = None
+    # A deterministic, normalized objective opportunity known before execution
+    # (for example formulation volume). Unlike expected_improvement, this is not
+    # a model posterior quantity.
+    objective_opportunity: float | None = None
     uncertainty: float | None = None
     novelty: float | None = None
     constraint_margin: float | None = None
@@ -90,6 +94,9 @@ class CandidatePool:
     sources_used: tuple[str, ...] = ()
     sources_dropped: tuple[str, ...] = ()
     construction_trace: tuple[str, ...] = ()
+    # Candidates removed by a pool-level learned filter before the hard gate.
+    # Retained for complete proposal provenance, never considered for selection.
+    filtered_out: tuple[PooledCandidate, ...] = ()
 
 
 @dataclass(frozen=True)

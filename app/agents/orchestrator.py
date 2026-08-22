@@ -20,6 +20,11 @@ from pydantic import BaseModel, Field
 
 from app.agents.base import AgentResult, BaseAgent
 from app.agents.pause import PauseRequest, PauseResult
+from app.contracts.scientific_evidence import (
+    ScientificEvidenceAssessment,
+    ScientificEvidenceBundle,
+    ScientificEvidencePolicyMode,
+)
 from app.core.config import get_settings
 from app.services.adaptive_campaign_substrate import (
     build_adaptive_campaign_substrate_snapshot,
@@ -37,8 +42,17 @@ from app.services.campaign_decision_authority import (
 )
 from app.services.decision_layer import CampaignDecisionLayer
 from app.services.decision_trace import CampaignDecisionTraceBuilder
+from app.services.pas_scientific_evidence import (
+    PasScientificEvidenceAdapter,
+    PasScientificEvidenceClient,
+    PasScientificEvidenceErrorType,
+    unavailable_evidence_assessment,
+)
 from app.services.primitives_registry import get_registry
 from app.services.round_context import build_campaign_round_context
+from app.services.scientific_ledger_runtime import (
+    should_capture_decision_trace as _should_capture_decision_trace,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +79,68 @@ class RecoveryExecutionError(RuntimeError):
         self.chemical_safety = chemical_safety
 
 
+def _maybe_collect_pas_scientific_evidence(
+    *,
+    supplied_bundle: dict[str, Any] | ScientificEvidenceBundle | None,
+    query_payload: dict[str, Any],
+) -> tuple[
+    ScientificEvidenceBundle | None,
+    ScientificEvidenceAssessment | None,
+    dict[str, Any],
+]:
+    """Collect and validate PAS evidence behind independent default-off gates."""
+    settings = get_settings()
+    fetch_enabled = bool(getattr(settings, "pas_evidence_fetch_enabled", False))
+    shadow_enabled = bool(getattr(settings, "pas_evidence_shadow_enabled", False))
+    influence_enabled = bool(
+        getattr(settings, "pas_evidence_influence_enabled", False)
+    )
+    policy_mode = (
+        ScientificEvidencePolicyMode.BOUNDED
+        if influence_enabled
+        else ScientificEvidencePolicyMode.SHADOW
+        if shadow_enabled
+        else ScientificEvidencePolicyMode.OFF
+    )
+    audit: dict[str, Any] = {
+        "policy_mode": policy_mode.value,
+        "collected": False,
+    }
+    if not (fetch_enabled or shadow_enabled or influence_enabled):
+        return None, None, audit
+
+    value: Any = supplied_bundle
+    if value is None and fetch_enabled:
+        try:
+            value = PasScientificEvidenceClient().query(dict(query_payload))
+        except Exception:
+            logger.warning(
+                "PAS scientific evidence collection failed closed",
+                exc_info=True,
+            )
+            assessment = unavailable_evidence_assessment(
+                policy_mode=policy_mode,
+                reason="PAS scientific evidence collection is unavailable.",
+                error_type=PasScientificEvidenceErrorType.UNAVAILABLE,
+            )
+            audit["error_type"] = PasScientificEvidenceErrorType.UNAVAILABLE.value
+            return None, assessment, audit
+
+    if value is None:
+        assessment = unavailable_evidence_assessment(
+            policy_mode=policy_mode,
+            reason="No PAS scientific evidence bundle was supplied or fetched.",
+            error_type=PasScientificEvidenceErrorType.UNAVAILABLE,
+        )
+        audit["error_type"] = PasScientificEvidenceErrorType.UNAVAILABLE.value
+        return None, assessment, audit
+
+    advice = PasScientificEvidenceAdapter().adapt(value, policy_mode=policy_mode)
+    audit.update(advice.audit_metadata)
+    audit["collected"] = advice.bundle is not None
+    return advice.bundle, advice.assessment, audit
+
+
 def _maybe_record_contextual_shadow_decision(
     *,
     campaign_id: str,
@@ -82,6 +158,8 @@ def _maybe_record_contextual_shadow_decision(
     validation_summary: dict[str, Any] | None = None,
     human_observations: list[str] | None = None,
     literature_summary: dict[str, Any] | None = None,
+    scientific_evidence: ScientificEvidenceBundle | None = None,
+    scientific_evidence_assessment: ScientificEvidenceAssessment | None = None,
     metadata: dict[str, Any] | None = None,
     actual_stage: str | None = None,
     actual_action: str | None = None,
@@ -94,7 +172,20 @@ def _maybe_record_contextual_shadow_decision(
         authority_enabled = getattr(
             settings, "campaign_decision_authority_enabled", False
         )
-        if not shadow_enabled and not ledger_enabled and not authority_enabled:
+        drift_monitor_enabled = getattr(
+            settings, "closed_loop_drift_monitor_enabled", False
+        )
+        pas_evidence_enabled = bool(
+            getattr(settings, "pas_evidence_shadow_enabled", False)
+            or getattr(settings, "pas_evidence_influence_enabled", False)
+        )
+        if (
+            not shadow_enabled
+            and not ledger_enabled
+            and not authority_enabled
+            and not drift_monitor_enabled
+            and not pas_evidence_enabled
+        ):
             return None
 
         context = build_campaign_round_context(
@@ -113,9 +204,31 @@ def _maybe_record_contextual_shadow_decision(
             validation_summary=validation_summary,
             human_observations=human_observations,
             literature_summary=literature_summary,
+            scientific_evidence=scientific_evidence,
+            scientific_evidence_assessment=scientific_evidence_assessment,
             metadata=metadata,
         )
         decision_plan = CampaignDecisionLayer().decide(context)
+        if scientific_evidence_assessment is not None:
+            decision_plan = decision_plan.model_copy(
+                deep=True,
+                update={
+                    "metadata": {
+                        **dict(decision_plan.metadata),
+                        "scientific_evidence_policy_mode": (
+                            scientific_evidence_assessment.policy_mode.value
+                        ),
+                        "scientific_evidence_status": (
+                            scientific_evidence_assessment.status.value
+                        ),
+                        "scientific_evidence_bundle_id": (
+                            scientific_evidence.bundle_id
+                            if scientific_evidence is not None
+                            else None
+                        ),
+                    }
+                },
+            )
         trace = CampaignDecisionTraceBuilder().build(
             context=context,
             decision_plan=decision_plan,
@@ -544,6 +657,9 @@ class OrchestratorInput(BaseModel):
         description="Paths to tool holder config JSON files to load",
     )
 
+    # Optional typed inputs for the reporting-only closed-loop drift monitor.
+    closed_loop_context: dict[str, Any] = Field(default_factory=dict)
+
     # --- Enhancement: NLP code generation ---
     nl_intent: str = Field(
         default="",
@@ -619,8 +735,19 @@ class OrchestratorAgent(BaseAgent[OrchestratorInput, OrchestratorOutput]):
 
         # RL strategy router (optional — defaults to rule-based mode)
         try:
-            from app.services.strategy_router import StrategyRouter
-            self._strategy_router = StrategyRouter()
+            from app.core.config import get_settings
+            from app.services.strategy_router import RouterConfig, StrategyRouter
+
+            _settings = get_settings()
+            self._strategy_router = StrategyRouter(
+                RouterConfig(
+                    mode=_settings.strategy_router_mode,
+                    rl_backend=_settings.strategy_router_rl_backend,
+                    ab_test_rl_fraction=_settings.strategy_router_ab_fraction,
+                    confidence_threshold=_settings.strategy_router_confidence_threshold,
+                    explore=_settings.strategy_router_explore,
+                )
+            )
         except Exception:
             self._strategy_router = None
             logger.debug("Strategy router not available, using rule-based only", exc_info=True)
@@ -702,6 +829,15 @@ class OrchestratorAgent(BaseAgent[OrchestratorInput, OrchestratorOutput]):
             "domain_hypotheses": [],
             "literature_priors": [],
             "human_observations": [],
+            "instrument_state": dict(
+                (input_data.closed_loop_context or {}).get("instrument_state", {}) or {}
+            ),
+            "closed_loop_observations": list(
+                (input_data.closed_loop_context or {}).get("observations", []) or []
+            )[-200:],
+            "proxy_gap_assessment": dict(
+                (input_data.closed_loop_context or {}).get("proxy_gap_assessment", {}) or {}
+            ),
         }
 
     @staticmethod
@@ -732,6 +868,11 @@ class OrchestratorAgent(BaseAgent[OrchestratorInput, OrchestratorOutput]):
             synthesis_routes=tuple(raw.get("synthesis_routes", []) or []),
             measurement_protocols=tuple(raw.get("measurement_protocols", []) or []),
             instrument_state=dict(raw.get("instrument_state", {}) or {}),
+            closed_loop_observations=[
+                item for item in (raw.get("closed_loop_observations", []) or [])
+                if isinstance(item, dict)
+            ],
+            proxy_gap_assessment=dict(raw.get("proxy_gap_assessment", {}) or {}),
             material_family=raw.get("material_family"),
             prior_campaigns=tuple(raw.get("prior_campaigns", []) or []),
             literature_priors=tuple(raw.get("literature_priors", []) or []),
@@ -1406,6 +1547,27 @@ class OrchestratorAgent(BaseAgent[OrchestratorInput, OrchestratorOutput]):
                 logger.info("Skipping completed round %d on resume", round_num)
                 continue
 
+            # Best-effort closed-loop drift report for this round (reporting-only).
+            try:
+                from app.services.closed_loop_runtime import (
+                    assess_and_persist_closed_loop_drift,
+                )
+
+                assess_and_persist_closed_loop_drift(
+                    campaign_id=campaign_id,
+                    round_index=round_num,
+                    campaign_context=campaign_context_dict,
+                    parameters=all_params,
+                    parameter_rounds=all_rounds,
+                    dimensions=input_data.dimensions,
+                    emit=lambda event: self._emit(campaign_id, event),
+                )
+            except Exception:
+                logger.debug(
+                    "Closed-loop drift monitor failed; preserving prior context",
+                    exc_info=True,
+                )
+
             # Resolve this round's experimental node before strategy selection.
             # Nexus contributes evidence only; HELIOS performs all eligibility,
             # approval, and live-authority checks locally.
@@ -2023,10 +2185,15 @@ class OrchestratorAgent(BaseAgent[OrchestratorInput, OrchestratorOutput]):
                     ),
                 }
 
-            round_decision_trace = _maybe_record_contextual_shadow_decision(
-                **decision_context_kwargs,
-                actual_stage="candidate_generation",
-            )
+            if _should_capture_decision_trace() or getattr(
+                get_settings(), "closed_loop_drift_monitor_enabled", False
+            ):
+                round_decision_trace = _maybe_record_contextual_shadow_decision(
+                    **decision_context_kwargs,
+                    actual_stage="candidate_generation",
+                )
+            else:
+                round_decision_trace = None
             scientific_campaign_metadata = {
                 "objective": decision_context_kwargs["objective_summary"],
                 "constraints": decision_context_kwargs["constraint_summary"],
@@ -2483,10 +2650,37 @@ class OrchestratorAgent(BaseAgent[OrchestratorInput, OrchestratorOutput]):
                 )
 
             # 2b. For each candidate, compile protocol
+            try:
+                from app.services.closed_loop_drift import (
+                    build_candidate_applicability_context,
+                )
+
+                candidate_applicability_context = (
+                    build_candidate_applicability_context(
+                        objective_kpi=input_data.objective_kpi,
+                        direction=input_data.direction,
+                        campaign_context=campaign_context_dict,
+                        protocol_pattern_id=round_protocol_pattern_id,
+                        strategy=round_strategy,
+                        backend=(strategy_decision_info or {}).get("backend"),
+                    )
+                )
+            except Exception:
+                logger.debug(
+                    "Candidate applicability context unavailable; recording empty",
+                    exc_info=True,
+                )
+                candidate_applicability_context = {}
             for i, candidate_params in enumerate(design_candidates):
                 # --- Checkpoint: candidate start + idempotent skip ---
                 try:
-                    start_candidate(campaign_id, round_num, i, candidate_params)
+                    start_candidate(
+                        campaign_id,
+                        round_num,
+                        i,
+                        candidate_params,
+                        applicability_context=candidate_applicability_context,
+                    )
                 except Exception:
                     logger.debug("Failed to checkpoint candidate start", exc_info=True)
 
@@ -3036,6 +3230,36 @@ class OrchestratorAgent(BaseAgent[OrchestratorInput, OrchestratorOutput]):
                 # Accumulate step history for anomaly detection
                 step_history.append(step_result)
 
+                # Persist a bounded closed-loop observation for drift monitoring.
+                try:
+                    from app.services.closed_loop_runtime import (
+                        record_closed_loop_observation,
+                    )
+
+                    record_closed_loop_observation(
+                        campaign_id=campaign_id,
+                        campaign_context=campaign_context_dict,
+                        round_number=round_num,
+                        candidate_index=i,
+                        parameters=candidate_params,
+                        kpi=run_kpi,
+                        step_result=step_result,
+                        strategy=round_strategy,
+                        backend=(strategy_decision_info or {}).get("backend"),
+                        failure_reason=(
+                            "qc_abort"
+                            if (
+                                monitor_result.success
+                                and monitor_result.output.recommendation == "abort"
+                            )
+                            else None
+                        ),
+                    )
+                except Exception:
+                    logger.debug(
+                        "Failed to record closed-loop observation", exc_info=True
+                    )
+
                 # Track QC outcomes for v3 qc_fail_rate
                 total_qc_checks += 1
 
@@ -3437,6 +3661,28 @@ class OrchestratorAgent(BaseAgent[OrchestratorInput, OrchestratorOutput]):
                     ),
                     "message": "Scientific Decision Card finalized.",
                 })
+
+            # Recompute after the current outcome is durable, so the resulting
+            # report is exactly the context consumed by the following round.
+            try:
+                from app.services.closed_loop_runtime import (
+                    assess_and_persist_closed_loop_drift,
+                )
+
+                assess_and_persist_closed_loop_drift(
+                    campaign_id=campaign_id,
+                    round_index=round_num + 1,
+                    campaign_context=campaign_context_dict,
+                    parameters=all_params,
+                    parameter_rounds=all_rounds,
+                    dimensions=input_data.dimensions,
+                    emit=lambda event: self._emit(campaign_id, event),
+                    force=True,
+                )
+            except Exception:
+                logger.debug(
+                    "Closed-loop drift post-round monitor failed", exc_info=True
+                )
 
             if stop_result.success and stop_result.output.decision != "continue":
                 top_k = self._compute_top_k_ranking(

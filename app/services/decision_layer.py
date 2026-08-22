@@ -60,6 +60,92 @@ class CampaignDecisionLayer:
                 evidence=[_summary_evidence("safety_summary", "constraint_risk", context.safety_summary)],
             )
 
+        if _drift_requires_context_review(context.drift_summary):
+            return CampaignDecisionPlan(
+                action_type=CampaignDecisionAction.REQUEST_HUMAN_OBSERVATION,
+                route_target="decision_context_review",
+                context_requests=[
+                    CampaignContextRequest(
+                        request_type="decision_context_completion",
+                        reason=(
+                            "Closed-loop drift monitoring found missing decision, "
+                            "override, or failure context from prior rounds."
+                        ),
+                        priority="high",
+                        target="decision_memory",
+                        payload={
+                            "drift_report_id": context.drift_summary.get(
+                                "report_id"
+                            ),
+                            "omissions": list(
+                                context.decision_memory.get("omissions", [])
+                            )[:8],
+                        },
+                    )
+                ],
+                rationale=(
+                    "Missing prior-round context can amplify closed-loop error; "
+                    "complete the context before generating more candidates."
+                ),
+                confidence=_drift_confidence(context.drift_summary),
+                shadow_only=True,
+                evidence=[
+                    _summary_evidence(
+                        "closed_loop_drift",
+                        "context_drift",
+                        context.drift_summary,
+                    )
+                ],
+            )
+
+        if _drift_requires_objective_review(context.drift_summary):
+            return CampaignDecisionPlan(
+                action_type=CampaignDecisionAction.REVISE_OBJECTIVE,
+                route_target="objective_revision",
+                objective_patch=ObjectivePatch(
+                    reason=(
+                        "Closed-loop monitoring found an expanding gap between "
+                        "the proxy and the scientific objective."
+                    ),
+                    proposed_changes={
+                        "drift_report": _json_safe(context.drift_summary),
+                        "auto_applied": False,
+                    },
+                    shadow_only=True,
+                ),
+                rationale=(
+                    "Target drift requires objective review before further proxy optimization."
+                ),
+                confidence=_drift_confidence(context.drift_summary),
+                shadow_only=True,
+                evidence=[
+                    _summary_evidence(
+                        "closed_loop_drift",
+                        "target_drift",
+                        context.drift_summary,
+                    )
+                ],
+            )
+
+        if _drift_requires_validation(context.drift_summary):
+            return CampaignDecisionPlan(
+                action_type=CampaignDecisionAction.RUN_VALIDATION,
+                route_target="closed_loop_drift_validation",
+                rationale=(
+                    "Closed-loop drift signals require validation before more candidate generation."
+                ),
+                confidence=_drift_confidence(context.drift_summary),
+                shadow_only=True,
+                evidence=[
+                    _summary_evidence(
+                        "closed_loop_drift",
+                        "validation_required",
+                        context.drift_summary,
+                    )
+                ],
+                metadata={"drift_report_id": context.drift_summary.get("report_id")},
+            )
+
         if _is_validation_due(context.validation_summary):
             return CampaignDecisionPlan(
                 action_type=CampaignDecisionAction.RUN_VALIDATION,
@@ -312,6 +398,34 @@ def _is_validation_due(summary: dict[str, Any]) -> bool:
         or summary.get("due") is True
         or summary.get("status") == "due"
     )
+
+
+def _drift_requires_validation(summary: dict[str, Any]) -> bool:
+    return summary.get("requires_validation") is True
+
+
+def _drift_requires_objective_review(summary: dict[str, Any]) -> bool:
+    return summary.get("requires_objective_review") is True
+
+
+def _drift_requires_context_review(summary: dict[str, Any]) -> bool:
+    return summary.get("requires_context_review") is True
+
+
+def _drift_confidence(summary: dict[str, Any]) -> float:
+    scores = [
+        _as_float(signal.get("score"))
+        for signal in summary.get("signals", [])
+        if isinstance(signal, dict) and signal.get("score") is not None
+    ]
+    if scores:
+        return min(0.95, max(0.5, sum(scores) / len(scores)))
+    status = summary.get("overall_status")
+    if status == "drift":
+        return 0.85
+    if status == "watch":
+        return 0.6
+    return 0.5
 
 
 def _is_high_objective_proxy_gap(
