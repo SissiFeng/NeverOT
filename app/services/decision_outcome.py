@@ -7,12 +7,14 @@ updates happen here.
 """
 from __future__ import annotations
 
+from collections.abc import Sequence
 from copy import deepcopy
 from datetime import UTC, datetime
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
+from app.contracts.scientific_intervention import ScientificIntervention
 from app.services.decision_trace import CampaignDecisionTrace
 from app.services.verifiable_reward import (
     RUBRIC_VERSION_DEFAULT,
@@ -78,6 +80,7 @@ class CampaignDecisionOutcome(BaseModel):
     recovery_success: bool | None = None
     context_request_fulfilled: bool | None = None
     human_override: bool | None = None
+    intervention_ids: list[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -86,6 +89,15 @@ class CampaignDecisionOutcome(BaseModel):
     def _created_at_must_be_timezone_aware(cls, value: datetime) -> datetime:
         if value.tzinfo is None or value.tzinfo.utcoffset(value) is None:
             raise ValueError("created_at must be timezone-aware")
+        return value
+
+    @field_validator("intervention_ids")
+    @classmethod
+    def _intervention_ids_are_unique(cls, value: list[str]) -> list[str]:
+        if any(not item for item in value):
+            raise ValueError("intervention_ids must be non-empty")
+        if len(value) != len(set(value)):
+            raise ValueError("intervention_ids must be unique")
         return value
 
 
@@ -119,6 +131,7 @@ class CampaignDecisionAccounting(BaseModel):
     trace: CampaignDecisionTrace
     outcome: CampaignDecisionOutcome
     reward: CampaignDecisionReward
+    interventions: list[ScientificIntervention] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -128,6 +141,26 @@ class CampaignDecisionAccounting(BaseModel):
         if value.tzinfo is None or value.tzinfo.utcoffset(value) is None:
             raise ValueError("created_at must be timezone-aware")
         return value
+
+    @model_validator(mode="after")
+    def _intervention_references_are_aligned(self) -> CampaignDecisionAccounting:
+        trace_ids = self.trace.intervention_ids
+        outcome_ids = self.outcome.intervention_ids
+        intervention_ids = [item.intervention_id for item in self.interventions]
+        if trace_ids != outcome_ids or trace_ids != intervention_ids:
+            raise ValueError(
+                "trace, outcome, and accounting intervention ids must align"
+            )
+        if len(intervention_ids) != len(set(intervention_ids)):
+            raise ValueError("accounting interventions must be unique")
+        for intervention in self.interventions:
+            if intervention.campaign_id != self.trace.campaign_id:
+                raise ValueError("intervention campaign_id must match accounting trace")
+            if intervention.round_index != self.trace.round_index:
+                raise ValueError("intervention round_index must match accounting trace")
+            if intervention.decision_trace_id != self.trace.trace_id:
+                raise ValueError("intervention decision_trace_id must match accounting trace")
+        return self
 
 
 class CampaignDecisionOutcomeBuilder:
@@ -169,6 +202,7 @@ class CampaignDecisionOutcomeBuilder:
             recovery_success=recovery_success,
             context_request_fulfilled=context_request_fulfilled,
             human_override=human_override,
+            intervention_ids=list(trace.intervention_ids),
             metadata=deepcopy(dict(metadata or {})),
         )
 
@@ -249,6 +283,7 @@ class CampaignDecisionAccountingBuilder:
         *,
         trace: CampaignDecisionTrace,
         outcome: CampaignDecisionOutcome,
+        interventions: Sequence[ScientificIntervention] = (),
         metadata: dict[str, Any] | None = None,
     ) -> CampaignDecisionAccounting:
         reward = CampaignDecisionRewardCalculator().calculate(outcome)
@@ -256,6 +291,7 @@ class CampaignDecisionAccountingBuilder:
             trace=trace.model_copy(deep=True),
             outcome=outcome.model_copy(deep=True),
             reward=reward,
+            interventions=[item.model_copy(deep=True) for item in interventions],
             metadata=deepcopy(dict(metadata or {})),
         )
 

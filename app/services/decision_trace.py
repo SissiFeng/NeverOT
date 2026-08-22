@@ -6,6 +6,7 @@ comparison logic; it does not call live services or mutate campaign runtime.
 """
 from __future__ import annotations
 
+from collections.abc import Sequence
 from copy import deepcopy
 from datetime import UTC, datetime
 from typing import Any
@@ -41,6 +42,7 @@ class CampaignDecisionTrace(BaseModel):
     would_change_route: bool = False
     comparison: dict[str, Any] = Field(default_factory=dict)
     evidence: list[CampaignDecisionEvidence] = Field(default_factory=list)
+    intervention_ids: list[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -49,6 +51,15 @@ class CampaignDecisionTrace(BaseModel):
     def _created_at_must_be_timezone_aware(cls, value: datetime) -> datetime:
         if value.tzinfo is None or value.tzinfo.utcoffset(value) is None:
             raise ValueError("created_at must be timezone-aware")
+        return value
+
+    @field_validator("intervention_ids")
+    @classmethod
+    def _intervention_ids_are_unique(cls, value: list[str]) -> list[str]:
+        if any(not item for item in value):
+            raise ValueError("intervention_ids must be non-empty")
+        if len(value) != len(set(value)):
+            raise ValueError("intervention_ids must be unique")
         return value
 
 
@@ -64,6 +75,7 @@ class CampaignDecisionTraceBuilder:
         actual_action: str | None = None,
         metadata: dict[str, Any] | None = None,
         trace_id: str | None = None,
+        intervention_ids: Sequence[str] = (),
     ) -> CampaignDecisionTrace:
         shadow_action = decision_plan.action_type
         would_change_route = (
@@ -86,6 +98,7 @@ class CampaignDecisionTraceBuilder:
             would_change_route=would_change_route,
             comparison=comparison,
             evidence=deepcopy(decision_plan.evidence),
+            intervention_ids=list(intervention_ids),
             metadata=deepcopy(dict(metadata or {})),
         )
 

@@ -5,6 +5,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from app.contracts.scientific_intervention import ScientificIntervention
 from app.services.decision_outcome import (
     CampaignDecisionAccounting,
     CampaignDecisionAccountingBuilder,
@@ -59,10 +60,13 @@ def finalize_scientific_decision(
     observations: Sequence[Any] | None = None,
     failures: Sequence[Any] | None = None,
     recovery_events: Sequence[Any] | None = None,
+    interventions: Sequence[ScientificIntervention] | None = None,
 ) -> RuntimeDecisionAccountingResult:
     """Close Trace -> Outcome -> Reward, persist it, then project to Markdown."""
     from app.services.decision_trajectory import persist_campaign_trajectory
 
+    normalized_interventions = _normalize_interventions(trace, interventions or ())
+    trace = _trace_with_interventions(trace, normalized_interventions)
     trace = _trace_with_observed_action(trace, observed_action)
     outcome = CampaignDecisionOutcomeBuilder().build(
         trace=trace,
@@ -84,6 +88,7 @@ def finalize_scientific_decision(
     accounting = CampaignDecisionAccountingBuilder().build(
         trace=trace,
         outcome=outcome,
+        interventions=normalized_interventions,
         metadata=dict(metadata or {}),
     )
     trajectory_id = persist_campaign_trajectory(accounting)
@@ -145,6 +150,47 @@ def _trace_with_observed_action(
             "comparison": comparison,
         },
     )
+
+
+def _normalize_interventions(
+    trace: CampaignDecisionTrace,
+    interventions: Sequence[ScientificIntervention],
+) -> tuple[ScientificIntervention, ...]:
+    normalized: list[ScientificIntervention] = []
+    intervention_ids: set[str] = set()
+    for intervention in interventions:
+        if intervention.campaign_id != trace.campaign_id:
+            raise ValueError("intervention campaign_id must match the decision trace")
+        if intervention.round_index != trace.round_index:
+            raise ValueError("intervention round_index must match the decision trace")
+        if intervention.decision_trace_id not in {None, trace.trace_id}:
+            raise ValueError("intervention decision_trace_id must match the decision trace")
+        if intervention.intervention_id in intervention_ids:
+            raise ValueError("intervention_id must be unique within an intervention batch")
+        intervention_ids.add(intervention.intervention_id)
+        normalized.append(
+            intervention.model_copy(
+                deep=True,
+                update={"decision_trace_id": trace.trace_id},
+            )
+        )
+    return tuple(normalized)
+
+
+def _trace_with_interventions(
+    trace: CampaignDecisionTrace,
+    interventions: Sequence[ScientificIntervention],
+) -> CampaignDecisionTrace:
+    intervention_ids = [item.intervention_id for item in interventions]
+    if trace.intervention_ids:
+        if trace.intervention_ids != intervention_ids:
+            raise ValueError(
+                "typed interventions must match the decision trace intervention ids"
+            )
+        return trace
+    if trace.intervention_ids == intervention_ids:
+        return trace
+    return trace.model_copy(deep=True, update={"intervention_ids": intervention_ids})
 
 
 __all__ = [

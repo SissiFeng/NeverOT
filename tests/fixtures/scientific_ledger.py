@@ -1,5 +1,16 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
+from app.contracts.scientific_intervention import (
+    CampaignEndpointSpec,
+    EndpointComparison,
+    EndpointCriterion,
+    InterventionFeasibilityAssessment,
+    InterventionFeasibilityStatus,
+    MeasurementProtocolSpec,
+    SynthesisRouteSpec,
+)
 from app.services.decision_layer import CampaignDecisionLayer
 from app.services.decision_outcome import (
     CampaignDecisionAccounting,
@@ -8,6 +19,10 @@ from app.services.decision_outcome import (
 )
 from app.services.decision_trace import CampaignDecisionTrace, CampaignDecisionTraceBuilder
 from app.services.round_context import CampaignRoundContextBuilder
+from app.services.scientific_intervention import (
+    build_intervention_utility,
+    build_scientific_intervention,
+)
 
 
 def decision_trace(
@@ -121,3 +136,68 @@ def decision_accounting(
         metadata={"authorization": "Bearer super-secret-token"},
     )
     return CampaignDecisionAccountingBuilder().build(trace=trace, outcome=outcome)
+
+
+def scientific_intervention(
+    *,
+    campaign_id: str = "campaign-32",
+    round_index: int = 3,
+    candidate_index: int = 0,
+    trace_id: str | None = "cdt-ledger-003",
+):
+    endpoint = CampaignEndpointSpec(
+        endpoint_id="yield-endpoint",
+        statement="Reach reproducible yield within the campaign budget.",
+        criteria=(
+            EndpointCriterion(
+                criterion_id="yield",
+                metric_name="yield",
+                comparison=EndpointComparison.AT_LEAST,
+                threshold=0.9,
+                minimum_replicates=2,
+                measurement_protocol_id="yield-v1",
+            ),
+        ),
+        max_experiments=20,
+    )
+    utility = build_intervention_utility(
+        scientific_value=0.7,
+        information_value=0.3,
+        failure_penalty=0.1,
+        execution_cost_penalty=0.05,
+        execution_time_penalty=0.05,
+        expected_endpoint_impact=0.2,
+        expected_information_gain=0.3,
+        rationale="Endpoint value exceeds bounded execution penalties.",
+    )
+    return build_scientific_intervention(
+        campaign_id=campaign_id,
+        round_index=round_index,
+        candidate_index=candidate_index,
+        decision_trace_id=trace_id,
+        endpoint=endpoint,
+        scientific_target="Test the selected formulation against the yield endpoint.",
+        design_parameters={"x": 0.2 + candidate_index * 0.1},
+        synthesis_route=SynthesisRouteSpec(
+            route_id="route-a",
+            route_name="baseline synthesis route",
+            process_parameters={"mix_s": 30},
+            required_capabilities=("liquid_handler",),
+        ),
+        measurement_protocol=MeasurementProtocolSpec(
+            protocol_id="yield-v1",
+            metric_names=("yield",),
+            instrument_ids=("reader-1",),
+            replicates=2,
+        ),
+        required_instruments=("reader-1",),
+        feasibility=InterventionFeasibilityAssessment(
+            status=InterventionFeasibilityStatus.ELIGIBLE,
+            expected_failure_risk=0.1,
+            expected_cost=5.0,
+            expected_duration_s=120.0,
+        ),
+        utility=utility,
+        provenance={"source": "fixture"},
+        created_at=datetime(2026, 8, 22, 12, 0, tzinfo=UTC),
+    )

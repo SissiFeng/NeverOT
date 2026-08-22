@@ -56,6 +56,7 @@ The live path is conservative by design: rule-based, auditable, and bounded by e
 - **Context-aware policy** — uses objective hierarchy, proxy-gap state, failure attribution, backend memory, Nexus diagnostics, BO MCP availability, candidate/failure-zone memory, and bandit/learned-policy signals.
 - **Dynamic action vocabulary** — represents optimization, validation, calibration, failure diagnosis, context seeking, human observation, safety-constraint tightening, stopping, and future scale/fidelity choices.
 - **Candidate and backend arbitration** — combines local baselines, Nexus/BO MCP signals, candidate pools, safety gates, and provenance into a traceable portfolio.
+- **Scientific intervention contract** — promotes a selected candidate into a versioned endpoint + material + route + process + measurement + feasibility + utility record without changing provider contracts or granting live authority.
 - **Failure-aware recovery** — separates scientific negative evidence from measurement, backend, constraint, and downstream tool failures.
 - **Trace, reward, and replay** — records `StrategyTrace`, `StrategyEvidence`, `StrategyOutcome`, `StrategyReward`, typed `FailureEvent`, and replay summaries.
 - **Scientific evidence loop** — tracks falsifiable claims, updates posterior odds only from independent auditable likelihood ratios, ranks hypothesis-discrimination experiments by robust information gain, and blocks live promotion behind prospective evidence and explicit approval.
@@ -97,7 +98,7 @@ rounds/001/
   summary.md
 ```
 
-Decision Cards contain the question, scientific context, evidence, ranked candidate actions, selected action/backend, rationale, confidence/expected gain, outcome, reward/verifiers, failure/recovery counts, and reproducibility provenance. Values are deterministically rendered and recursively redacted before they reach Markdown.
+Decision Cards contain the question, scientific context, evidence, ranked candidate actions, selected action/backend, typed scientific interventions, rationale, confidence/expected gain, outcome, reward/verifiers, failure/recovery counts, and reproducibility provenance. Values are deterministically rendered and recursively redacted before they reach Markdown.
 
 The read-only API exposes:
 
@@ -119,8 +120,20 @@ The scientific evidence loop is deliberately separate from the operational rewar
 | **Campaign policy** | Decide next campaign-level action and strategy mode | `app/services/strategy_selector.py`, `app/services/strategy_actions.py`, `app/services/decision_layer.py` |
 | **Evidence and memory** | Track scientific claims/posteriors, discrimination plans, diagnostics, prior-campaign evidence, failure history, and backend memory | `app/services/scientific_evidence.py`, `app/services/hypothesis_experiment_planner.py`, `app/services/scientific_ledger.py`, `app/services/backend_memory.py` |
 | **Candidate/backend arbitration** | Build, gate, score, and explain candidate/backend choices | `app/optimization/service.py`, `app/optimization/pool_service.py`, `app/optimization/decision_policy.py`, `app/optimization/provenance.py` |
+| **Scientific intervention** | Bind a candidate to campaign endpoints, physical route, measurement, constraints, feasibility, and execution-aware utility; preserve batch-aware IDs through trace and replay | `app/contracts/scientific_intervention.py`, `app/services/scientific_intervention.py`, `app/services/scientific_ledger_runtime.py` |
 | **Adaptive substrate** | Shadow-only scientific activity mode, dynamic action space, and value-of-information assessment | `app/services/adaptive_campaign_substrate.py`, `app/services/campaign_mode.py`, `app/services/dynamic_action_space.py`, `app/services/value_of_information.py` |
 | **Outcome and replay** | Evaluate decision quality, reward components, and replay summaries | `app/services/decision_outcome.py`, `app/services/verifiable_reward.py`, `app/services/decision_replay.py`, `app/services/policy_evaluation.py` |
+
+### Scientific Intervention Contract (shadow)
+
+`Candidate` remains the stable optimizer/provider proposal boundary. HELIOS only
+promotes a candidate to `ScientificIntervention` after binding it to a
+`CampaignEndpointSpec`, synthesis route and process parameters, measurement
+protocol, required instruments, safety constraints, feasibility evidence, and
+an execution-aware utility decomposition. A round may carry multiple
+interventions; their stable IDs remain aligned across decision trace, outcome,
+trajectory JSON, and the Scientific Decision Ledger. Contract version `v1` is
+strictly shadow-only and does not authorize compilation or hardware execution.
 
 ### Adaptive Campaign Decision Layer
 
