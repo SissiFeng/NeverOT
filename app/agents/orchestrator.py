@@ -89,13 +89,15 @@ def _maybe_collect_pas_scientific_evidence(
     ScientificEvidenceAssessment | None,
     dict[str, Any],
 ]:
-    """Collect and validate PAS evidence behind independent default-off gates."""
+    """Collect and validate PAS evidence behind independent, fail-closed gates."""
     settings = get_settings()
     fetch_enabled = bool(getattr(settings, "pas_evidence_fetch_enabled", False))
     shadow_enabled = bool(getattr(settings, "pas_evidence_shadow_enabled", False))
     influence_enabled = bool(
         getattr(settings, "pas_evidence_influence_enabled", False)
     )
+    if not (fetch_enabled or shadow_enabled or influence_enabled):
+        return None, None, {"policy_mode": "off", "collected": False}
     policy_mode = (
         ScientificEvidencePolicyMode.BOUNDED
         if influence_enabled
@@ -107,16 +109,16 @@ def _maybe_collect_pas_scientific_evidence(
         "policy_mode": policy_mode.value,
         "collected": False,
     }
-    if not (fetch_enabled or shadow_enabled or influence_enabled):
-        return None, None, audit
-
+    source = "supplied" if supplied_bundle is not None else "remote"
+    audit["source"] = source
     value: Any = supplied_bundle
     if value is None and fetch_enabled:
         try:
             value = PasScientificEvidenceClient().query(dict(query_payload))
-        except Exception:
+        except Exception as exc:
             logger.warning(
-                "PAS scientific evidence collection failed closed",
+                "PAS scientific evidence collection failed closed (%s)",
+                type(exc).__name__,
                 exc_info=True,
             )
             assessment = unavailable_evidence_assessment(
@@ -125,6 +127,7 @@ def _maybe_collect_pas_scientific_evidence(
                 error_type=PasScientificEvidenceErrorType.UNAVAILABLE,
             )
             audit["error_type"] = PasScientificEvidenceErrorType.UNAVAILABLE.value
+            audit["exception_type"] = type(exc).__name__
             return None, assessment, audit
 
     if value is None:
@@ -161,6 +164,8 @@ def _maybe_record_contextual_shadow_decision(
     literature_summary: dict[str, Any] | None = None,
     scientific_evidence: ScientificEvidenceBundle | None = None,
     scientific_evidence_assessment: ScientificEvidenceAssessment | None = None,
+    drift_summary: dict[str, Any] | None = None,
+    decision_memory: dict[str, Any] | None = None,
     metadata: dict[str, Any] | None = None,
     actual_stage: str | None = None,
     actual_action: str | None = None,
@@ -176,9 +181,9 @@ def _maybe_record_contextual_shadow_decision(
         drift_monitor_enabled = getattr(
             settings, "closed_loop_drift_monitor_enabled", False
         )
-        pas_evidence_enabled = bool(
-            getattr(settings, "pas_evidence_shadow_enabled", False)
-            or getattr(settings, "pas_evidence_influence_enabled", False)
+        pas_shadow_enabled = getattr(settings, "pas_evidence_shadow_enabled", False)
+        pas_influence_enabled = getattr(
+            settings, "pas_evidence_influence_enabled", False
         )
         intervention_shadow_enabled = getattr(
             settings, "scientific_intervention_shadow_enabled", False
@@ -187,8 +192,9 @@ def _maybe_record_contextual_shadow_decision(
             not shadow_enabled
             and not ledger_enabled
             and not authority_enabled
+            and not pas_shadow_enabled
+            and not pas_influence_enabled
             and not drift_monitor_enabled
-            and not pas_evidence_enabled
             and not intervention_shadow_enabled
         ):
             return None
@@ -211,6 +217,8 @@ def _maybe_record_contextual_shadow_decision(
             literature_summary=literature_summary,
             scientific_evidence=scientific_evidence,
             scientific_evidence_assessment=scientific_evidence_assessment,
+            drift_summary=drift_summary,
+            decision_memory=decision_memory,
             metadata=metadata,
         )
         decision_plan = CampaignDecisionLayer().decide(context)
@@ -751,7 +759,9 @@ class OrchestratorInput(BaseModel):
         description="Paths to tool holder config JSON files to load",
     )
 
-    # Optional typed inputs for the reporting-only closed-loop drift monitor.
+    # Optional advisory-only inputs for scientific evidence and drift reporting.
+    scientific_evidence_bundle: dict[str, Any] | None = None
+    scientific_evidence_query: dict[str, Any] = Field(default_factory=dict)
     closed_loop_context: dict[str, Any] = Field(default_factory=dict)
 
     # --- Enhancement: NLP code generation ---
@@ -924,13 +934,17 @@ class OrchestratorAgent(BaseAgent[OrchestratorInput, OrchestratorOutput]):
             "literature_priors": [],
             "human_observations": [],
             "instrument_state": dict(
-                (input_data.closed_loop_context or {}).get("instrument_state", {}) or {}
+                (input_data.closed_loop_context or {}).get("instrument_state", {})
+                or {}
             ),
             "closed_loop_observations": list(
                 (input_data.closed_loop_context or {}).get("observations", []) or []
             )[-200:],
             "proxy_gap_assessment": dict(
-                (input_data.closed_loop_context or {}).get("proxy_gap_assessment", {}) or {}
+                (input_data.closed_loop_context or {}).get(
+                    "proxy_gap_assessment", {}
+                )
+                or {}
             ),
         }
 
@@ -962,10 +976,11 @@ class OrchestratorAgent(BaseAgent[OrchestratorInput, OrchestratorOutput]):
             synthesis_routes=tuple(raw.get("synthesis_routes", []) or []),
             measurement_protocols=tuple(raw.get("measurement_protocols", []) or []),
             instrument_state=dict(raw.get("instrument_state", {}) or {}),
-            closed_loop_observations=[
-                item for item in (raw.get("closed_loop_observations", []) or [])
+            closed_loop_observations=tuple(
+                item
+                for item in (raw.get("closed_loop_observations", []) or [])
                 if isinstance(item, dict)
-            ],
+            ),
             proxy_gap_assessment=dict(raw.get("proxy_gap_assessment", {}) or {}),
             material_family=raw.get("material_family"),
             prior_campaigns=tuple(raw.get("prior_campaigns", []) or []),
@@ -1641,7 +1656,7 @@ class OrchestratorAgent(BaseAgent[OrchestratorInput, OrchestratorOutput]):
                 logger.info("Skipping completed round %d on resume", round_num)
                 continue
 
-            # Best-effort closed-loop drift report for this round (reporting-only).
+            # Reporting-only drift assessment; it cannot mutate live routing.
             try:
                 from app.services.closed_loop_runtime import (
                     assess_and_persist_closed_loop_drift,
@@ -2201,6 +2216,20 @@ class OrchestratorAgent(BaseAgent[OrchestratorInput, OrchestratorOutput]):
                         exc_info=True,
                     )
 
+            pas_query_payload = dict(input_data.scientific_evidence_query or {})
+            pas_query_payload.setdefault("campaign_id", campaign_id)
+            pas_query_payload.setdefault("round_index", round_num)
+            pas_query_payload.setdefault("objective", input_data.objective_kpi)
+            pas_query_payload.setdefault("direction", input_data.direction)
+            (
+                pas_scientific_evidence,
+                pas_scientific_evidence_assessment,
+                pas_scientific_evidence_audit,
+            ) = _maybe_collect_pas_scientific_evidence(
+                supplied_bundle=input_data.scientific_evidence_bundle,
+                query_payload=pas_query_payload,
+            )
+
             decision_context_kwargs = {
                 "campaign_id": campaign_id,
                 "round_index": round_num,
@@ -2250,6 +2279,15 @@ class OrchestratorAgent(BaseAgent[OrchestratorInput, OrchestratorOutput]):
                         (campaign_context_dict or {}).get("literature_priors", []) or []
                     ),
                 },
+                "scientific_evidence": pas_scientific_evidence,
+                "scientific_evidence_assessment": pas_scientific_evidence_assessment,
+                "drift_summary": dict(
+                    (campaign_context_dict or {}).get("closed_loop_drift_report")
+                    or {}
+                ),
+                "decision_memory": dict(
+                    (campaign_context_dict or {}).get("decision_memory") or {}
+                ),
                 "metadata": {
                     "round_strategy": round_strategy,
                     "planned_strategy": planned_round.strategy,
@@ -2257,6 +2295,7 @@ class OrchestratorAgent(BaseAgent[OrchestratorInput, OrchestratorOutput]):
                     "experimental_route_decision": dict(
                         experimental_route_decision_payload
                     ),
+                    "pas_scientific_evidence": pas_scientific_evidence_audit,
                 },
             }
 
@@ -2730,6 +2769,28 @@ class OrchestratorAgent(BaseAgent[OrchestratorInput, OrchestratorOutput]):
                 if design_result.output.backend_state is not None:
                     bomcp_backend_state = design_result.output.backend_state
 
+            try:
+                from app.services.closed_loop_drift import (
+                    build_candidate_applicability_context,
+                )
+
+                candidate_applicability_context = (
+                    build_candidate_applicability_context(
+                        objective_kpi=input_data.objective_kpi,
+                        direction=input_data.direction,
+                        campaign_context=campaign_context_dict,
+                        protocol_pattern_id=round_protocol_pattern_id,
+                        strategy=round_strategy,
+                        backend=(strategy_decision_info or {}).get("backend"),
+                    )
+                )
+            except Exception:
+                logger.debug(
+                    "Candidate applicability context unavailable; recording empty",
+                    exc_info=True,
+                )
+                candidate_applicability_context = {}
+
             # ⑤: attach read-only memory recall (similar past candidates +
             # cross-campaign failure zones) to this round's persisted decision
             # trace. Evidence-only — it never changes candidate selection — and
@@ -2744,6 +2805,7 @@ class OrchestratorAgent(BaseAgent[OrchestratorInput, OrchestratorOutput]):
                     design_candidates,
                     round_dimensions,
                     round_protocol_template,
+                    current_context=candidate_applicability_context,
                 )
                 _evidence_trace = (strategy_decision_info or {}).get("strategy_trace")
                 if _round_evidence is not None and isinstance(_evidence_trace, dict):
@@ -3420,7 +3482,8 @@ class OrchestratorAgent(BaseAgent[OrchestratorInput, OrchestratorOutput]):
                     )
                 except Exception:
                     logger.debug(
-                        "Failed to record closed-loop observation", exc_info=True
+                        "Failed to record closed-loop observation",
+                        exc_info=True,
                     )
 
                 # Track QC outcomes for v3 qc_fail_rate
@@ -3831,8 +3894,8 @@ class OrchestratorAgent(BaseAgent[OrchestratorInput, OrchestratorOutput]):
                     "message": "Scientific Decision Card finalized.",
                 })
 
-            # Recompute after the current outcome is durable, so the resulting
-            # report is exactly the context consumed by the following round.
+            # Recompute after current outcomes are durable; this bounded report
+            # is the context consumed by the following round.
             try:
                 from app.services.closed_loop_runtime import (
                     assess_and_persist_closed_loop_drift,
@@ -3850,7 +3913,8 @@ class OrchestratorAgent(BaseAgent[OrchestratorInput, OrchestratorOutput]):
                 )
             except Exception:
                 logger.debug(
-                    "Closed-loop drift post-round monitor failed", exc_info=True
+                    "Closed-loop drift post-round monitor failed",
+                    exc_info=True,
                 )
 
             if stop_result.success and stop_result.output.decision != "continue":

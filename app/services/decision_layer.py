@@ -10,6 +10,10 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from app.contracts.scientific_evidence import (
+    ScientificEvidencePolicyMode,
+    ScientificEvidenceRecommendedAction,
+)
 from app.services.decision_models import (
     CampaignContextRequest,
     CampaignDecisionAction,
@@ -145,6 +149,10 @@ class CampaignDecisionLayer:
                 ],
                 metadata={"drift_report_id": context.drift_summary.get("report_id")},
             )
+
+        scientific_evidence_plan = _scientific_evidence_plan(context)
+        if scientific_evidence_plan is not None:
+            return scientific_evidence_plan
 
         if _is_validation_due(context.validation_summary):
             return CampaignDecisionPlan(
@@ -306,7 +314,7 @@ class CampaignDecisionLayer:
         plan = self._wrap_strategy_result(context.strategy_selection_result)
         if _needs_backend_memory_context(context):
             _add_backend_memory_context_request(plan, context)
-        return plan
+        return _attach_scientific_evidence(plan, context)
 
     def _wrap_strategy_result(self, result: dict[str, Any]) -> CampaignDecisionPlan:
         evidence = _strategy_evidence(result.get("evidence"))
@@ -418,14 +426,120 @@ def _drift_confidence(summary: dict[str, Any]) -> float:
         for signal in summary.get("signals", [])
         if isinstance(signal, dict) and signal.get("score") is not None
     ]
-    if scores:
-        return min(0.95, max(0.5, sum(scores) / len(scores)))
+    finite_scores = [score for score in scores if score is not None]
+    if finite_scores:
+        return min(0.95, max(0.5, sum(finite_scores) / len(finite_scores)))
     status = summary.get("overall_status")
     if status == "drift":
         return 0.85
     if status == "watch":
         return 0.6
     return 0.5
+
+
+def _scientific_evidence_plan(
+    context: CampaignRoundContext,
+) -> CampaignDecisionPlan | None:
+    assessment = context.scientific_evidence_assessment
+    if (
+        assessment is None
+        or assessment.policy_mode != ScientificEvidencePolicyMode.BOUNDED
+    ):
+        return None
+
+    action = assessment.recommended_action
+    if action == ScientificEvidenceRecommendedAction.NONE:
+        return None
+    payload = assessment.model_dump(mode="json")
+    evidence = CampaignDecisionEvidence(
+        source="pas_scientific_evidence",
+        kind="scientific_evidence_assessment",
+        summary=(
+            f"PAS evidence assessment recommended {action.value}; "
+            "HELIOS retained execution authority."
+        ),
+        payload=payload,
+    )
+    metadata = {
+        "scientific_evidence_policy_mode": assessment.policy_mode.value,
+        "scientific_evidence_bundle_id": assessment.bundle_id,
+    }
+    if action == ScientificEvidenceRecommendedAction.RUN_VALIDATION:
+        return CampaignDecisionPlan(
+            action_type=CampaignDecisionAction.RUN_VALIDATION,
+            route_target="scientific_evidence_validation",
+            rationale="Bounded scientific evidence requires validation review.",
+            confidence=max(assessment.support_strength, assessment.contradiction_strength),
+            shadow_only=True,
+            evidence=[evidence],
+            metadata=metadata,
+        )
+    if action == ScientificEvidenceRecommendedAction.QUERY_LITERATURE:
+        return CampaignDecisionPlan(
+            action_type=CampaignDecisionAction.QUERY_LITERATURE,
+            route_target="literature",
+            context_requests=[
+                CampaignContextRequest(
+                    request_type="scientific_evidence_refresh",
+                    reason="PAS evidence is stale or insufficient.",
+                    priority="high",
+                    target="scientific_evidence",
+                    payload={"bundle_id": assessment.bundle_id},
+                )
+            ],
+            rationale="Bounded scientific evidence requires a literature refresh.",
+            confidence=max(0.5, assessment.support_strength),
+            shadow_only=True,
+            evidence=[evidence],
+            metadata=metadata,
+        )
+    if action == ScientificEvidenceRecommendedAction.REQUEST_HUMAN_OBSERVATION:
+        return CampaignDecisionPlan(
+            action_type=CampaignDecisionAction.REQUEST_HUMAN_OBSERVATION,
+            route_target="scientific_evidence_review",
+            context_requests=[
+                CampaignContextRequest(
+                    request_type="scientific_evidence_applicability",
+                    reason="PAS evidence applicability requires operator review.",
+                    priority="high",
+                    target="scientific_evidence",
+                    payload={"bundle_id": assessment.bundle_id},
+                )
+            ],
+            rationale="Bounded scientific evidence requires human applicability review.",
+            confidence=max(0.5, assessment.applicability_score),
+            shadow_only=True,
+            evidence=[evidence],
+            metadata=metadata,
+        )
+    return None
+
+
+def _attach_scientific_evidence(
+    plan: CampaignDecisionPlan,
+    context: CampaignRoundContext,
+) -> CampaignDecisionPlan:
+    assessment = context.scientific_evidence_assessment
+    if assessment is None or assessment.policy_mode == ScientificEvidencePolicyMode.OFF:
+        return plan
+    plan.metadata.update(
+        {
+            "scientific_evidence_policy_mode": assessment.policy_mode.value,
+            "scientific_evidence_bundle_id": assessment.bundle_id,
+        }
+    )
+    plan.evidence.append(
+        CampaignDecisionEvidence(
+            source="pas_scientific_evidence",
+            kind="scientific_evidence_assessment",
+            summary=(
+                f"PAS evidence was recorded in {assessment.policy_mode.value} mode "
+                "without changing live execution authority."
+            ),
+            payload=assessment.model_dump(mode="json"),
+        )
+    )
+    return plan
 
 
 def _is_high_objective_proxy_gap(

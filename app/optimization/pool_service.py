@@ -240,34 +240,43 @@ class CandidatePoolService:
 
     @staticmethod
     def _apply_failure_penalty(pool: CandidatePool, request: OptimizationRequest) -> CandidatePool:
-        """Drop candidates inside the learned failure region; never strand empty."""
+        """Rank by learned failure proximity and retain dropped-candidate provenance."""
         failed = request.context.get("failed_params") or ()
         if not failed or not pool.candidates:
             return pool
         from app.services.failure_region import FailureRegionModel
 
         model = FailureRegionModel.fit(failed=list(failed), space=request.space)
-        kept = tuple(c for c in pool.candidates if model.predicted_feasible(c.params))
-        if not kept or len(kept) == len(pool.candidates):
-            return pool  # all-failure-prone (keep the round alive) or nothing dropped
+        scored = sorted(
+            ((model.failure_score(candidate.params), candidate) for candidate in pool.candidates),
+            key=lambda pair: pair[0],
+        )
+        count = int(getattr(request, "n", 0) or len(pool.candidates))
+        kept = tuple(candidate for _, candidate in scored[:count])
+        if not kept:
+            return pool
         kept_ids = {id(candidate) for candidate in kept}
         filtered = tuple(
             replace(
                 candidate,
                 diagnostics={
                     **candidate.diagnostics,
-                    "pool_filter_reason": "learned_failure_region",
+                    "pool_filter_reason": "learned_failure_region_rank_limit",
                 },
             )
             for candidate in pool.candidates
             if id(candidate) not in kept_ids
         )
         dropped = len(pool.candidates) - len(kept)
+        notes = ["failure-zone re-rank: candidates ordered by failure proximity"]
+        if dropped:
+            notes.append(
+                f"failure-zone penalty: dropped {dropped} failure-prone candidate(s)"
+            )
         return CandidatePool(
             candidates=kept,
             sources_used=pool.sources_used,
             sources_dropped=pool.sources_dropped,
-            construction_trace=pool.construction_trace
-            + (f"failure-zone penalty: dropped {dropped} failure-prone candidate(s)",),
+            construction_trace=pool.construction_trace + tuple(notes),
             filtered_out=pool.filtered_out + filtered,
         )
