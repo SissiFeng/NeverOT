@@ -9,6 +9,8 @@ from app.contracts.scientific_intervention import (
     InterventionFeasibilityAssessment,
     InterventionFeasibilityStatus,
     MeasurementProtocolSpec,
+    ScientificIntervention,
+    ScientificInterventionPortfolio,
     SynthesisRouteSpec,
 )
 from app.services.decision_layer import CampaignDecisionLayer
@@ -199,5 +201,26 @@ def scientific_intervention(
         ),
         utility=utility,
         provenance={"source": "fixture"},
+        created_at=datetime(2026, 8, 22, 12, 0, tzinfo=UTC),
+    )
+
+
+def scientific_intervention_portfolio(
+    interventions: list[ScientificIntervention],
+) -> ScientificInterventionPortfolio:
+    intervention_ids = tuple(item.intervention_id for item in interventions)
+    ranked_ids = tuple(reversed(intervention_ids))
+    return ScientificInterventionPortfolio(
+        portfolio_id="sip-ledger-003",
+        campaign_id="campaign-32",
+        round_index=3,
+        decision_trace_id="cdt-ledger-003",
+        endpoint_id="yield-endpoint",
+        intervention_ids=intervention_ids,
+        ranked_intervention_ids=ranked_ids,
+        recommended_intervention_ids=ranked_ids[:1],
+        would_change_order=ranked_ids != intervention_ids,
+        rationale="Shadow utility prefers the second intervention.",
+        provenance={"live_order_preserved": True},
         created_at=datetime(2026, 8, 22, 12, 0, tzinfo=UTC),
     )

@@ -120,7 +120,7 @@ The scientific evidence loop is deliberately separate from the operational rewar
 | **Campaign policy** | Decide next campaign-level action and strategy mode | `app/services/strategy_selector.py`, `app/services/strategy_actions.py`, `app/services/decision_layer.py` |
 | **Evidence and memory** | Track scientific claims/posteriors, discrimination plans, diagnostics, prior-campaign evidence, failure history, and backend memory | `app/services/scientific_evidence.py`, `app/services/hypothesis_experiment_planner.py`, `app/services/scientific_ledger.py`, `app/services/backend_memory.py` |
 | **Candidate/backend arbitration** | Build, gate, score, and explain candidate/backend choices | `app/optimization/service.py`, `app/optimization/pool_service.py`, `app/optimization/decision_policy.py`, `app/optimization/provenance.py` |
-| **Scientific intervention** | Bind a candidate to campaign endpoints, physical route, measurement, constraints, feasibility, and execution-aware utility; preserve batch-aware IDs through trace and replay | `app/contracts/scientific_intervention.py`, `app/services/scientific_intervention.py`, `app/services/scientific_ledger_runtime.py` |
+| **Scientific intervention** | Bind and shadow-rank candidate portfolios against campaign endpoints, physical route, dynamic action feasibility, measurement, constraints, failure risk, cost, and time; preserve batch-aware IDs through trace and replay | `app/contracts/scientific_intervention.py`, `app/services/scientific_intervention.py`, `app/services/scientific_intervention_portfolio.py`, `app/services/scientific_ledger_runtime.py` |
 | **Adaptive substrate** | Shadow-only scientific activity mode, dynamic action space, and value-of-information assessment | `app/services/adaptive_campaign_substrate.py`, `app/services/campaign_mode.py`, `app/services/dynamic_action_space.py`, `app/services/value_of_information.py` |
 | **Outcome and replay** | Evaluate decision quality, reward components, and replay summaries | `app/services/decision_outcome.py`, `app/services/verifiable_reward.py`, `app/services/decision_replay.py`, `app/services/policy_evaluation.py` |
 
@@ -134,6 +134,17 @@ an execution-aware utility decomposition. A round may carry multiple
 interventions; their stable IDs remain aligned across decision trace, outcome,
 trajectory JSON, and the Scientific Decision Ledger. Contract version `v1` is
 strictly shadow-only and does not authorize compilation or hardware execution.
+
+With `SCIENTIFIC_INTERVENTION_SHADOW_ENABLED=true`, the orchestrator assembles a
+typed `ScientificInterventionPortfolio` after candidate generation. It combines
+candidate-pool evidence with the active HELIOS-owned route, endpoint criteria,
+measurement requirements, DynamicActionSpace capability/risk assessments, and
+failure/cost/time penalties. The portfolio records a shadow ranking and eligible
+recommendations, while preserving the original live candidate order. Unknown or
+blocked feasibility is never recommended. Its `ExecutionPlanRef` is explicitly
+`compiled=false` until the normal compiler stage runs; the portfolio grants no
+live route, protocol, or hardware authority. An explicit `campaign_endpoint` is
+preferred; legacy `target_value` is projected to a single endpoint criterion.
 
 ### Adaptive Campaign Decision Layer
 
@@ -226,6 +237,7 @@ pytest \
 | `CONTEXTUAL_DECISION_SHADOW_ENABLED` | `false` | Record the legacy contextual decision shadow trace per round |
 | `CAMPAIGN_DECISION_AUTHORITY_ENABLED` | `false` | Promote contextual campaign decisions into a bounded live pre-candidate gate |
 | `ADAPTIVE_SUBSTRATE_SHADOW_ENABLED` | `false` | Record the adaptive campaign substrate shadow snapshot per round |
+| `SCIENTIFIC_INTERVENTION_SHADOW_ENABLED` | `false` | Assemble and persist execution-aware intervention portfolio rankings without reordering live candidates |
 | `ENABLE_CANDIDATE_ARBITRATION` | `false` | Enable deep candidate-pool arbitration instead of legacy generation fallback |
 | `NEXUS_EXPERIMENTAL_ROUTES_ENABLED` | `false` | Request advisory experimental-route characterization from Nexus each round |
 | `EXPERIMENTAL_ROUTE_AUTHORITY_ENABLED` | `false` | Allow HELIOS to apply a route selected by its local safety/budget/approval policy |

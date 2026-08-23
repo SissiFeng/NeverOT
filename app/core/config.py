@@ -208,6 +208,13 @@ class Settings:
             "ADAPTIVE_SUBSTRATE_SHADOW_ENABLED", "false"
         ).lower() in ("true", "1", "yes")
 
+        # ---- Scientific intervention portfolio shadow ranking ----
+        # Builds endpoint-conditioned intervention portfolios and records their
+        # execution-aware ranking. It never reorders or executes live candidates.
+        self.scientific_intervention_shadow_enabled: bool = os.getenv(
+            "SCIENTIFIC_INTERVENTION_SHADOW_ENABLED", "false"
+        ).lower() in ("true", "1", "yes")
+
     @staticmethod
     def _load_puda_machine_map(raw: str) -> dict[str, str]:
         try:

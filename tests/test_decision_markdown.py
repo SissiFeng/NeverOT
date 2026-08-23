@@ -13,6 +13,7 @@ from tests.fixtures.scientific_ledger import (
     decision_accounting,
     decision_trace,
     scientific_intervention,
+    scientific_intervention_portfolio,
 )
 
 
@@ -76,6 +77,7 @@ def test_completed_card_contains_outcome_reward_failure_and_recovery():
 def test_completed_card_renders_typed_intervention_summary():
     accounting = decision_accounting()
     intervention = scientific_intervention()
+    portfolio = scientific_intervention_portfolio([intervention])
     trace = accounting.trace.model_copy(
         deep=True,
         update={"intervention_ids": [intervention.intervention_id]},
@@ -90,6 +92,7 @@ def test_completed_card_renders_typed_intervention_summary():
             "trace": trace,
             "outcome": outcome,
             "interventions": [intervention],
+            "intervention_portfolio": portfolio,
         },
     )
 
@@ -100,6 +103,8 @@ def test_completed_card_renders_typed_intervention_summary():
     assert "yield-endpoint" in card
     assert "route-a" in card
     assert "yield-v1" in card
+    assert portfolio.portfolio_id in card
+    assert "Shadow rank" in card
 
 
 def test_redaction_recurses_through_nested_payloads_and_strings():

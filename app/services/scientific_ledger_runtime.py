@@ -5,7 +5,10 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from app.contracts.scientific_intervention import ScientificIntervention
+from app.contracts.scientific_intervention import (
+    ScientificIntervention,
+    ScientificInterventionPortfolio,
+)
 from app.services.decision_outcome import (
     CampaignDecisionAccounting,
     CampaignDecisionAccountingBuilder,
@@ -61,11 +64,17 @@ def finalize_scientific_decision(
     failures: Sequence[Any] | None = None,
     recovery_events: Sequence[Any] | None = None,
     interventions: Sequence[ScientificIntervention] | None = None,
+    intervention_portfolio: ScientificInterventionPortfolio | None = None,
 ) -> RuntimeDecisionAccountingResult:
     """Close Trace -> Outcome -> Reward, persist it, then project to Markdown."""
     from app.services.decision_trajectory import persist_campaign_trajectory
 
     normalized_interventions = _normalize_interventions(trace, interventions or ())
+    normalized_portfolio = _normalize_intervention_portfolio(
+        trace,
+        normalized_interventions,
+        intervention_portfolio,
+    )
     trace = _trace_with_interventions(trace, normalized_interventions)
     trace = _trace_with_observed_action(trace, observed_action)
     outcome = CampaignDecisionOutcomeBuilder().build(
@@ -89,6 +98,7 @@ def finalize_scientific_decision(
         trace=trace,
         outcome=outcome,
         interventions=normalized_interventions,
+        intervention_portfolio=normalized_portfolio,
         metadata=dict(metadata or {}),
     )
     trajectory_id = persist_campaign_trajectory(accounting)
@@ -118,6 +128,7 @@ def should_capture_decision_trace() -> bool:
         getattr(settings, "contextual_decision_shadow_enabled", False)
         or getattr(settings, "scientific_ledger_enabled", False)
         or getattr(settings, "campaign_decision_authority_enabled", False)
+        or getattr(settings, "scientific_intervention_shadow_enabled", False)
     )
 
 
@@ -191,6 +202,28 @@ def _trace_with_interventions(
     if trace.intervention_ids == intervention_ids:
         return trace
     return trace.model_copy(deep=True, update={"intervention_ids": intervention_ids})
+
+
+def _normalize_intervention_portfolio(
+    trace: CampaignDecisionTrace,
+    interventions: Sequence[ScientificIntervention],
+    portfolio: ScientificInterventionPortfolio | None,
+) -> ScientificInterventionPortfolio | None:
+    if portfolio is None:
+        return None
+    if portfolio.campaign_id != trace.campaign_id:
+        raise ValueError("portfolio campaign_id must match the decision trace")
+    if portfolio.round_index != trace.round_index:
+        raise ValueError("portfolio round_index must match the decision trace")
+    if portfolio.decision_trace_id not in {None, trace.trace_id}:
+        raise ValueError("portfolio decision_trace_id must match the decision trace")
+    intervention_ids = tuple(item.intervention_id for item in interventions)
+    if portfolio.intervention_ids != intervention_ids:
+        raise ValueError("portfolio intervention ids must match typed interventions")
+    return portfolio.model_copy(
+        deep=True,
+        update={"decision_trace_id": trace.trace_id},
+    )
 
 
 __all__ = [

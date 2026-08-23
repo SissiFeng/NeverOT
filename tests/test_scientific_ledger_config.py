@@ -26,3 +26,10 @@ def test_scientific_ledger_settings_are_configurable(monkeypatch, tmp_path):
     assert settings.scientific_ledger_enabled is False
     assert settings.scientific_ledger_git_enabled is True
     assert settings.scientific_ledger_git_auto_init is False
+
+
+def test_scientific_intervention_shadow_defaults_off(monkeypatch):
+    monkeypatch.delenv("SCIENTIFIC_INTERVENTION_SHADOW_ENABLED", raising=False)
+    assert Settings().scientific_intervention_shadow_enabled is False
+    monkeypatch.setenv("SCIENTIFIC_INTERVENTION_SHADOW_ENABLED", "true")
+    assert Settings().scientific_intervention_shadow_enabled is True

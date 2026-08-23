@@ -25,6 +25,7 @@ from app.contracts.scientific_evidence import (
     ScientificEvidenceBundle,
     ScientificEvidencePolicyMode,
 )
+from app.contracts.scientific_intervention import CampaignEndpointSpec
 from app.core.config import get_settings
 from app.services.adaptive_campaign_substrate import (
     build_adaptive_campaign_substrate_snapshot,
@@ -179,12 +180,16 @@ def _maybe_record_contextual_shadow_decision(
             getattr(settings, "pas_evidence_shadow_enabled", False)
             or getattr(settings, "pas_evidence_influence_enabled", False)
         )
+        intervention_shadow_enabled = getattr(
+            settings, "scientific_intervention_shadow_enabled", False
+        )
         if (
             not shadow_enabled
             and not ledger_enabled
             and not authority_enabled
             and not drift_monitor_enabled
             and not pas_evidence_enabled
+            and not intervention_shadow_enabled
         ):
             return None
 
@@ -538,17 +543,21 @@ def _maybe_record_adaptive_campaign_substrate_snapshot(
     protocol_template: dict[str, Any] | None = None,
     safety_summary: dict[str, Any] | None = None,
     now: Any | None = None,
+    force_for_intervention: bool = False,
 ) -> Any | None:
     """Record the adaptive campaign substrate snapshot as a parallel shadow track.
 
     Strictly observational: it assembles the Phase 1-5 substrate artifact from
     read-only round inputs and logs it. It never affects routing, strategy
-    selection, candidate selection, or execution, and its return value is
-    intentionally ignored by the round loop. The VoI ranking inside the artifact
-    is advisory only. Failures are swallowed so the live campaign is unaffected.
+    selection, candidate selection, or execution. The returned snapshot may be
+    consumed by the shadow intervention portfolio; its VoI ranking remains
+    advisory only. Failures are swallowed so the live campaign is unaffected.
     """
     try:
-        if not get_settings().adaptive_substrate_shadow_enabled:
+        if (
+            not get_settings().adaptive_substrate_shadow_enabled
+            and not force_for_intervention
+        ):
             return None
 
         registry = get_registry()
@@ -584,6 +593,10 @@ def _maybe_record_adaptive_campaign_substrate_snapshot(
             now=now,
         )
         snapshot.metadata["available_capabilities_source"] = capabilities_source
+        snapshot.metadata["forced_for_scientific_intervention"] = bool(
+            force_for_intervention
+            and not get_settings().adaptive_substrate_shadow_enabled
+        )
 
         logger.info(
             "adaptive_campaign_substrate_snapshot %s",
@@ -593,6 +606,86 @@ def _maybe_record_adaptive_campaign_substrate_snapshot(
     except Exception:
         logger.warning(
             "Adaptive substrate shadow hook failed; continuing live campaign",
+            exc_info=True,
+        )
+        return None
+
+
+def _maybe_build_scientific_intervention_portfolio(
+    *,
+    campaign_id: str,
+    round_index: int,
+    decision_trace: Any | None,
+    objective_kpi: str,
+    direction: str,
+    target_value: float | None,
+    max_rounds: int,
+    batch_size: int,
+    explicit_endpoint: CampaignEndpointSpec | None,
+    candidates: list[dict[str, Any]],
+    route_graph: dict[str, Any] | None,
+    active_experimental_node_id: str | None,
+    experimental_route_decision: dict[str, Any] | None,
+    protocol_template: dict[str, Any],
+    protocol_pattern_id: str,
+    adaptive_campaign_snapshot: Any | None,
+    candidate_evidence: list[dict[str, Any]] | None,
+    available_capabilities: list[str] | None,
+    policy_snapshot: dict[str, Any] | None,
+    now: Any | None = None,
+) -> Any | None:
+    """Build the shadow portfolio; never alter candidate order or execution."""
+    try:
+        if not getattr(
+            get_settings(), "scientific_intervention_shadow_enabled", False
+        ):
+            return None
+        if decision_trace is None or not candidates:
+            return None
+
+        from app.services.scientific_intervention_portfolio import (
+            build_campaign_intervention_portfolio,
+        )
+
+        portfolio = build_campaign_intervention_portfolio(
+            campaign_id=campaign_id,
+            round_index=round_index,
+            decision_trace_id=decision_trace.trace_id,
+            objective_kpi=objective_kpi,
+            direction=direction,
+            target_value=target_value,
+            max_rounds=max_rounds,
+            batch_size=batch_size,
+            explicit_endpoint=explicit_endpoint,
+            candidates=candidates,
+            route_graph=route_graph,
+            active_experimental_node_id=active_experimental_node_id,
+            experimental_route_decision=experimental_route_decision,
+            protocol_template=protocol_template,
+            protocol_pattern_id=protocol_pattern_id,
+            adaptive_campaign_snapshot=adaptive_campaign_snapshot,
+            candidate_evidence=list(candidate_evidence or []),
+            available_capabilities=available_capabilities,
+            policy_snapshot=policy_snapshot,
+            created_at=now,
+        )
+        if portfolio is None:
+            logger.info(
+                "scientific_intervention_portfolio skipped: campaign=%s round=%s "
+                "reason=no_campaign_endpoint",
+                campaign_id,
+                round_index,
+            )
+            return None
+        logger.info(
+            "scientific_intervention_portfolio %s",
+            json.dumps(portfolio.portfolio.model_dump(mode="json"), sort_keys=True),
+        )
+        return portfolio
+    except Exception:
+        logger.warning(
+            "Scientific intervention portfolio hook failed; preserving live "
+            "candidate order",
             exc_info=True,
         )
         return None
@@ -612,6 +705,7 @@ class OrchestratorInput(BaseModel):
     batch_size: int
     strategy: str = "lhs"
     target_value: float | None = None
+    campaign_endpoint: CampaignEndpointSpec | None = None
 
     # Parameter space
     dimensions: list[dict[str, Any]]
@@ -2213,17 +2307,23 @@ class OrchestratorAgent(BaseAgent[OrchestratorInput, OrchestratorOutput]):
                 policy_snapshot=scientific_policy_snapshot,
             )
 
-            # Parallel shadow track: adaptive campaign substrate snapshot.
-            # Independent of the contextual decision trace above; observational
-            # only, its return value is intentionally not consumed.
-            _maybe_record_adaptive_campaign_substrate_snapshot(
-                campaign_id=campaign_id,
-                round_index=round_num,
-                objective_kpi=input_data.objective_kpi,
-                max_rounds=input_data.max_rounds,
-                failure_event_dicts=failure_event_dicts,
-                protocol_template=round_protocol_template,
-                safety_summary=dict(input_data.policy_snapshot or {}),
+            # Parallel shadow track: action-space state can inform the shadow
+            # intervention portfolio but never changes the live candidate order.
+            adaptive_campaign_snapshot = (
+                _maybe_record_adaptive_campaign_substrate_snapshot(
+                    campaign_id=campaign_id,
+                    round_index=round_num,
+                    objective_kpi=input_data.objective_kpi,
+                    max_rounds=input_data.max_rounds,
+                    failure_event_dicts=failure_event_dicts,
+                    protocol_template=round_protocol_template,
+                    safety_summary=dict(input_data.policy_snapshot or {}),
+                    force_for_intervention=getattr(
+                        get_settings(),
+                        "scientific_intervention_shadow_enabled",
+                        False,
+                    ),
+                )
             )
 
             # Optional live campaign-decision authority. This is the promotion
@@ -2484,6 +2584,7 @@ class OrchestratorAgent(BaseAgent[OrchestratorInput, OrchestratorOutput]):
             # can neither downgrade the round nor break the campaign. With the
             # flag off, none of this runs and behavior is unchanged.
             arbitration_candidates: list[dict[str, Any]] | None = None
+            candidate_portfolio_evidence: list[dict[str, Any]] = []
             if stabilize_candidates is None and strategy_decision is not None:
                 try:
                     if get_settings().enable_candidate_arbitration:
@@ -2515,6 +2616,9 @@ class OrchestratorAgent(BaseAgent[OrchestratorInput, OrchestratorOutput]):
                             arbitration_candidates = [
                                 dict(c) for c in arb_outcome.decision.final_candidates
                             ]
+                            candidate_portfolio_evidence = list(
+                                arb_outcome.provenance.get("candidate_pool", []) or []
+                            )
                             self._emit(campaign_id, {
                                 "type": "candidate_arbitration",
                                 "round": round_num,
@@ -2648,6 +2752,59 @@ class OrchestratorAgent(BaseAgent[OrchestratorInput, OrchestratorOutput]):
                 logger.debug(
                     "decision evidence recall failed; continuing", exc_info=True
                 )
+
+            round_intervention_portfolio = (
+                _maybe_build_scientific_intervention_portfolio(
+                    campaign_id=campaign_id,
+                    round_index=round_num,
+                    decision_trace=round_decision_trace,
+                    objective_kpi=input_data.objective_kpi,
+                    direction=input_data.direction,
+                    target_value=input_data.target_value,
+                    max_rounds=input_data.max_rounds,
+                    batch_size=planned_round.batch_size,
+                    explicit_endpoint=input_data.campaign_endpoint,
+                    candidates=[dict(item) for item in design_candidates],
+                    route_graph=route_graph,
+                    active_experimental_node_id=active_experimental_node_id,
+                    experimental_route_decision=experimental_route_decision_payload,
+                    protocol_template=round_protocol_template,
+                    protocol_pattern_id=round_protocol_pattern_id,
+                    adaptive_campaign_snapshot=adaptive_campaign_snapshot,
+                    candidate_evidence=candidate_portfolio_evidence,
+                    available_capabilities=input_data.available_capabilities,
+                    policy_snapshot=input_data.policy_snapshot,
+                )
+            )
+            round_interventions = (
+                list(round_intervention_portfolio.interventions)
+                if round_intervention_portfolio is not None
+                else []
+            )
+            if round_intervention_portfolio is not None:
+                _portfolio = round_intervention_portfolio.portfolio
+                self._emit(campaign_id, {
+                    "type": "scientific_intervention_portfolio",
+                    "round": round_num,
+                    "portfolio_id": _portfolio.portfolio_id,
+                    "intervention_ids": list(_portfolio.intervention_ids),
+                    "ranked_intervention_ids": list(
+                        _portfolio.ranked_intervention_ids
+                    ),
+                    "recommended_intervention_ids": list(
+                        _portfolio.recommended_intervention_ids
+                    ),
+                    "would_change_order": _portfolio.would_change_order,
+                    "shadow_only": True,
+                    "message": _portfolio.rationale,
+                })
+                agent_trace.append({
+                    "agent": "scientific_intervention_portfolio",
+                    "round": round_num,
+                    "portfolio_id": _portfolio.portfolio_id,
+                    "would_change_order": _portfolio.would_change_order,
+                    "live_candidate_order_preserved": True,
+                })
 
             # 2b. For each candidate, compile protocol
             try:
@@ -3088,6 +3245,12 @@ class OrchestratorAgent(BaseAgent[OrchestratorInput, OrchestratorOutput]):
                                 observations=[{"execution_error": str(exc)}],
                                 failures=terminal_failures,
                                 recovery_events=recovery_events,
+                                interventions=round_interventions,
+                                intervention_portfolio=(
+                                    round_intervention_portfolio.portfolio
+                                    if round_intervention_portfolio is not None
+                                    else None
+                                ),
                             )
                         )
                         if terminal_scientific_result is not None:
@@ -3643,6 +3806,12 @@ class OrchestratorAgent(BaseAgent[OrchestratorInput, OrchestratorOutput]):
                 observations=_analysis_observations,
                 failures=_round_failures,
                 recovery_events=_round_recovery_events,
+                interventions=round_interventions,
+                intervention_portfolio=(
+                    round_intervention_portfolio.portfolio
+                    if round_intervention_portfolio is not None
+                    else None
+                ),
             )
             if _scientific_result is not None:
                 ledger_result = _scientific_result.ledger_result

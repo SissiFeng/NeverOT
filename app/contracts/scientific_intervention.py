@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 ENDPOINT_CONTRACT_VERSION = "campaign_endpoint.v1"
 INTERVENTION_CONTRACT_VERSION = "scientific_intervention.v1"
+INTERVENTION_PORTFOLIO_CONTRACT_VERSION = "scientific_intervention_portfolio.v1"
 
 
 class _FrozenContract(BaseModel):
@@ -351,6 +352,58 @@ class ScientificIntervention(_FrozenContract):
         return self
 
 
+class ScientificInterventionPortfolio(_FrozenContract):
+    """Shadow ranking manifest for a batch of scientific interventions."""
+
+    contract_version: Literal["scientific_intervention_portfolio.v1"] = INTERVENTION_PORTFOLIO_CONTRACT_VERSION
+    portfolio_id: str = Field(min_length=1, max_length=200)
+    campaign_id: str = Field(min_length=1, max_length=200)
+    round_index: int = Field(ge=0)
+    decision_trace_id: str | None = Field(default=None, max_length=200)
+    endpoint_id: str = Field(min_length=1, max_length=160)
+    intervention_ids: tuple[str, ...] = Field(min_length=1)
+    ranked_intervention_ids: tuple[str, ...] = Field(min_length=1)
+    recommended_intervention_ids: tuple[str, ...] = ()
+    would_change_order: bool = False
+    rationale: str = Field(min_length=1, max_length=4000)
+    provenance: dict[str, Any] = Field(default_factory=dict)
+    shadow_only: bool = True
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+    @field_validator("provenance")
+    @classmethod
+    def _provenance_is_bounded(cls, value: dict[str, Any]) -> dict[str, Any]:
+        _validate_bounded_json(value)
+        return value
+
+    @field_validator("created_at")
+    @classmethod
+    def _created_at_is_aware(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.tzinfo.utcoffset(value) is None:
+            raise ValueError("created_at must be timezone-aware")
+        return value
+
+    @model_validator(mode="after")
+    def _ranking_is_complete_and_shadow_only(self) -> ScientificInterventionPortfolio:
+        intervention_ids = self.intervention_ids
+        ranked_ids = self.ranked_intervention_ids
+        if not self.shadow_only:
+            raise ValueError("scientific_intervention_portfolio.v1 is shadow-only")
+        if len(intervention_ids) != len(set(intervention_ids)):
+            raise ValueError("portfolio intervention_ids must be unique")
+        if len(ranked_ids) != len(set(ranked_ids)):
+            raise ValueError("ranked_intervention_ids must be unique")
+        if set(ranked_ids) != set(intervention_ids):
+            raise ValueError("ranked_intervention_ids must contain every intervention")
+        if len(self.recommended_intervention_ids) != len(set(self.recommended_intervention_ids)):
+            raise ValueError("recommended_intervention_ids must be unique")
+        if not set(self.recommended_intervention_ids).issubset(intervention_ids):
+            raise ValueError("recommended interventions must belong to the portfolio")
+        if self.would_change_order != (ranked_ids != intervention_ids):
+            raise ValueError("would_change_order must match the recorded ranking")
+        return self
+
+
 def _validate_bounded_json(value: Any, *, depth: int = 0) -> None:
     if depth > 6:
         raise ValueError("mapping exceeds depth limit 6")
@@ -386,6 +439,7 @@ __all__ = [
     "EndpointCriterionAssessment",
     "ExecutionPlanRef",
     "INTERVENTION_CONTRACT_VERSION",
+    "INTERVENTION_PORTFOLIO_CONTRACT_VERSION",
     "InterventionConstraint",
     "InterventionConstraintType",
     "InterventionFeasibilityAssessment",
@@ -394,5 +448,6 @@ __all__ = [
     "MaterialSpec",
     "MeasurementProtocolSpec",
     "ScientificIntervention",
+    "ScientificInterventionPortfolio",
     "SynthesisRouteSpec",
 ]

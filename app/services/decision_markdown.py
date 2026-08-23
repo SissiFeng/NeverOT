@@ -149,6 +149,11 @@ def _render_bundle(
         ]
         if accounting
         else [],
+        "intervention_portfolio": (
+            accounting.intervention_portfolio.model_dump(mode="json")
+            if accounting and accounting.intervention_portfolio is not None
+            else None
+        ),
         "observations": list(observations),
         "failures": list(failures),
         "recovery_events": list(recovery_events),
@@ -701,10 +706,37 @@ def _intervention_table(
                 ]
             )
         return "No scientific interventions were bound to this decision."
-    lines = [
-        "| Intervention ID | Candidate | Endpoint | Route | Measurement | Feasibility | Utility |",
-        "|---|---:|---|---|---|---|---:|",
-    ]
+    portfolio = accounting.intervention_portfolio
+    rank_by_id = (
+        {
+            intervention_id: rank
+            for rank, intervention_id in enumerate(
+                portfolio.ranked_intervention_ids,
+                start=1,
+            )
+        }
+        if portfolio is not None
+        else {}
+    )
+    recommended = (
+        set(portfolio.recommended_intervention_ids) if portfolio is not None else set()
+    )
+    lines: list[str] = []
+    if portfolio is not None:
+        lines.extend(
+            [
+                f"- Portfolio ID: {_safe_inline(portfolio.portfolio_id)}",
+                f"- Shadow reorders live batch: {'yes' if portfolio.would_change_order else 'no'}",
+                "- Live candidate order preserved: yes",
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            "| Intervention ID | Candidate | Shadow rank | Recommended | Endpoint | Route | Measurement | Feasibility | Utility |",
+            "|---|---:|---:|---|---|---|---|---|---:|",
+        ]
+    )
     for intervention in accounting.interventions:
         intervention_id = _safe_table(intervention.intervention_id)
         endpoint_id = _safe_table(intervention.endpoint.endpoint_id)
@@ -712,9 +744,15 @@ def _intervention_table(
         protocol_id = _safe_table(intervention.measurement_protocol.protocol_id)
         feasibility = _safe_table(intervention.feasibility.status.value)
         utility = _safe_table(_format_scalar(intervention.utility.total_utility))
+        shadow_rank = rank_by_id.get(intervention.intervention_id)
+        rank_text = str(shadow_rank) if shadow_rank is not None else "-"
+        recommended_text = (
+            "yes" if intervention.intervention_id in recommended else "no"
+        )
         lines.append(
-            f"| {intervention_id} | {intervention.candidate_index} | {endpoint_id} | "
-            f"{route_id} | {protocol_id} | {feasibility} | {utility} |"
+            f"| {intervention_id} | {intervention.candidate_index} | {rank_text} | "
+            f"{recommended_text} | {endpoint_id} | {route_id} | {protocol_id} | "
+            f"{feasibility} | {utility} |"
         )
     return "\n".join(lines)
 

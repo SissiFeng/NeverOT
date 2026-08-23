@@ -14,7 +14,10 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from app.contracts.scientific_intervention import ScientificIntervention
+from app.contracts.scientific_intervention import (
+    ScientificIntervention,
+    ScientificInterventionPortfolio,
+)
 from app.services.decision_trace import CampaignDecisionTrace
 from app.services.verifiable_reward import (
     RUBRIC_VERSION_DEFAULT,
@@ -132,6 +135,7 @@ class CampaignDecisionAccounting(BaseModel):
     outcome: CampaignDecisionOutcome
     reward: CampaignDecisionReward
     interventions: list[ScientificIntervention] = Field(default_factory=list)
+    intervention_portfolio: ScientificInterventionPortfolio | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -160,6 +164,19 @@ class CampaignDecisionAccounting(BaseModel):
                 raise ValueError("intervention round_index must match accounting trace")
             if intervention.decision_trace_id != self.trace.trace_id:
                 raise ValueError("intervention decision_trace_id must match accounting trace")
+        portfolio = self.intervention_portfolio
+        if portfolio is not None:
+            if portfolio.campaign_id != self.trace.campaign_id:
+                raise ValueError("portfolio campaign_id must match accounting trace")
+            if portfolio.round_index != self.trace.round_index:
+                raise ValueError("portfolio round_index must match accounting trace")
+            if portfolio.decision_trace_id != self.trace.trace_id:
+                raise ValueError("portfolio decision_trace_id must match accounting trace")
+            if list(portfolio.intervention_ids) != intervention_ids:
+                raise ValueError("portfolio intervention ids must match accounting")
+            endpoint_ids = {item.endpoint.endpoint_id for item in self.interventions}
+            if endpoint_ids != {portfolio.endpoint_id}:
+                raise ValueError("portfolio endpoint_id must match every intervention")
         return self
 
 
@@ -284,6 +301,7 @@ class CampaignDecisionAccountingBuilder:
         trace: CampaignDecisionTrace,
         outcome: CampaignDecisionOutcome,
         interventions: Sequence[ScientificIntervention] = (),
+        intervention_portfolio: ScientificInterventionPortfolio | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> CampaignDecisionAccounting:
         reward = CampaignDecisionRewardCalculator().calculate(outcome)
@@ -292,6 +310,11 @@ class CampaignDecisionAccountingBuilder:
             outcome=outcome.model_copy(deep=True),
             reward=reward,
             interventions=[item.model_copy(deep=True) for item in interventions],
+            intervention_portfolio=(
+                intervention_portfolio.model_copy(deep=True)
+                if intervention_portfolio is not None
+                else None
+            ),
             metadata=deepcopy(dict(metadata or {})),
         )
 
