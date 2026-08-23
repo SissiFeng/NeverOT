@@ -103,6 +103,22 @@ def test_enabled_flag_builds_and_logs_snapshot(monkeypatch, caplog):
     assert "adaptive_campaign_substrate_snapshot" in caplog.text
 
 
+def test_intervention_shadow_can_force_read_only_action_snapshot(monkeypatch):
+    import app.agents.orchestrator as orch
+
+    monkeypatch.setattr(orch, "get_settings", lambda: _Settings(adaptive=False))
+    monkeypatch.setattr(orch, "get_registry", _FakeRegistry)
+
+    snapshot = orch._maybe_record_adaptive_campaign_substrate_snapshot(
+        **_kwargs(),
+        force_for_intervention=True,
+    )
+
+    assert snapshot is not None
+    assert snapshot.shadow_only is True
+    assert snapshot.metadata["forced_for_scientific_intervention"] is True
+
+
 def test_builder_failure_is_fail_open(monkeypatch, caplog):
     import app.agents.orchestrator as orch
 

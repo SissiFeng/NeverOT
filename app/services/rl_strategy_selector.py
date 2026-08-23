@@ -120,7 +120,7 @@ class RLState:
     budget_pressure_high: float = 0.0
     drift_score: float = 0.0
 
-    # Total: 16 features
+    # Total: 37 features
 
     @classmethod
     def from_snapshot(
@@ -251,7 +251,9 @@ class RLState:
     @classmethod
     def n_features(cls) -> int:
         """Number of RL state features (network input dim)."""
-        return len(cls().to_array())
+        import dataclasses
+
+        return len(dataclasses.fields(cls))
 
 
 # ---------------------------------------------------------------------------
@@ -480,7 +482,7 @@ class QLearningAgent:
         # Adaptive binning with feature-specific strategies
         binned = []
 
-        # Unpack features (matching RLState.to_array() order - 15 features)
+        # Unpack features (matching RLState.to_array() order - 37 features)
         (
             f1_progress,                 # Round progress (0-1)
             f2_n_obs_ratio,             # Observations ratio (0-1)
@@ -497,6 +499,28 @@ class QLearningAgent:
             f13_convergence_plateau,    # Plateau indicator (0-1)
             f14_local_smoothness,       # Local smoothness (0-1)
             f15_batch_param_spread,     # Parameter spread (0-1)
+            f16_objective_feasibility,  # One-hot (0/1)
+            f17_objective_data_quality,  # One-hot (0/1)
+            f18_objective_baseline,     # One-hot (0/1)
+            f19_objective_performance,  # One-hot (0/1)
+            f20_objective_mechanism,    # One-hot (0/1)
+            f21_objective_generalization,  # One-hot (0/1)
+            f22_failure_hardware,       # Failure count (0-1)
+            f23_failure_protocol,       # Failure count (0-1)
+            f24_failure_constraint,     # Failure count (0-1)
+            f25_failure_measurement,    # Failure count (0-1)
+            f26_failure_model,          # Failure count (0-1)
+            f27_failure_backend,        # Failure count (0-1)
+            f28_failure_scientific_negative,  # Failure count (0-1)
+            f29_qc_fail_rate,           # QC failure rate (0-1)
+            f30_requires_revision,      # Binary (0/1)
+            f31_requires_route_switch,  # Binary (0/1)
+            f32_requires_calibration,   # Binary (0/1)
+            f33_n_hypotheses,           # Hypothesis count (0-1)
+            f34_n_literature_priors,    # Literature priors (0-1)
+            f35_warm_start_available,   # Binary (0/1)
+            f36_budget_pressure_high,   # Binary (0/1)
+            f37_drift_score,            # Drift score (0-1)
         ) = arr
 
         # Progress features: quantile binning
@@ -527,6 +551,38 @@ class QLearningAgent:
         # Landscape features
         binned.append(self._bin_confidence(f14_local_smoothness, n_bins))
         binned.append(self._bin_confidence(f15_batch_param_spread, n_bins))
+
+        # Scientific campaign context
+        # Objective one-hot: keep as-is (0/1)
+        binned.append(int(f16_objective_feasibility))
+        binned.append(int(f17_objective_data_quality))
+        binned.append(int(f18_objective_baseline))
+        binned.append(int(f19_objective_performance))
+        binned.append(int(f20_objective_mechanism))
+        binned.append(int(f21_objective_generalization))
+
+        # Failure-type counts: uncertainty-style binning (low counts dominate)
+        for failure_feature in (
+            f22_failure_hardware,
+            f23_failure_protocol,
+            f24_failure_constraint,
+            f25_failure_measurement,
+            f26_failure_model,
+            f27_failure_backend,
+            f28_failure_scientific_negative,
+        ):
+            binned.append(self._bin_uncertainty(failure_feature, n_bins))
+
+        # Governance / context signals
+        binned.append(self._bin_uncertainty(f29_qc_fail_rate, n_bins))
+        binned.append(int(f30_requires_revision))
+        binned.append(int(f31_requires_route_switch))
+        binned.append(int(f32_requires_calibration))
+        binned.append(self._bin_confidence(f33_n_hypotheses, n_bins))
+        binned.append(self._bin_confidence(f34_n_literature_priors, n_bins))
+        binned.append(int(f35_warm_start_available))
+        binned.append(int(f36_budget_pressure_high))
+        binned.append(self._bin_uncertainty(f37_drift_score, n_bins))
 
         return str(tuple(binned))
 

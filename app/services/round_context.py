@@ -61,8 +61,16 @@ class CampaignRoundContextBuilder:
             validation_summary=_dict_or_empty(validation_summary),
             human_observations=_list_or_empty(human_observations),
             literature_summary=_dict_or_empty(literature_summary),
-            scientific_evidence=scientific_evidence,
-            scientific_evidence_assessment=scientific_evidence_assessment,
+            scientific_evidence=(
+                scientific_evidence.model_copy(deep=True)
+                if scientific_evidence is not None
+                else None
+            ),
+            scientific_evidence_assessment=(
+                scientific_evidence_assessment.model_copy(deep=True)
+                if scientific_evidence_assessment is not None
+                else None
+            ),
             drift_summary=_dict_or_empty(drift_summary),
             decision_memory=_dict_or_empty(decision_memory),
             strategy_selection_result=_dict_or_empty(strategy_selection_result),

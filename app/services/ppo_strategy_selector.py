@@ -445,7 +445,9 @@ class PPOStrategySelector:
         self.config = config
         self.ACTIONS = ACTIONS
 
-        self.state_dim = 15
+        from app.services.rl_strategy_selector import RLState
+
+        self.state_dim = RLState.n_features()
         self.action_dim = len(ACTIONS)
 
         self.agent = PPOAgent(self.state_dim, self.action_dim, config)

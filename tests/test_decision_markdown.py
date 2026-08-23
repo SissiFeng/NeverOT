@@ -9,7 +9,12 @@ from app.services.decision_markdown import (
     render_policy_snapshot,
     render_trajectory_figure,
 )
-from tests.fixtures.scientific_ledger import decision_accounting, decision_trace
+from tests.fixtures.scientific_ledger import (
+    decision_accounting,
+    decision_trace,
+    scientific_intervention,
+    scientific_intervention_portfolio,
+)
 
 
 def _provenance() -> LedgerProvenance:
@@ -67,6 +72,39 @@ def test_completed_card_contains_outcome_reward_failure_and_recovery():
     assert "Bearer super-secret-token" not in "\n".join(bundle.files.values())
     assert "pipette offset" in bundle.files["rounds/003/failure.md"]
     assert "increase z offset 0.5mm" in bundle.files["rounds/003/recovery.md"]
+
+
+def test_completed_card_renders_typed_intervention_summary():
+    accounting = decision_accounting()
+    intervention = scientific_intervention()
+    portfolio = scientific_intervention_portfolio([intervention])
+    trace = accounting.trace.model_copy(
+        deep=True,
+        update={"intervention_ids": [intervention.intervention_id]},
+    )
+    outcome = accounting.outcome.model_copy(
+        deep=True,
+        update={"intervention_ids": [intervention.intervention_id]},
+    )
+    completed = accounting.model_copy(
+        deep=True,
+        update={
+            "trace": trace,
+            "outcome": outcome,
+            "interventions": [intervention],
+            "intervention_portfolio": portfolio,
+        },
+    )
+
+    card = render_completed_decision(completed).files[
+        "rounds/003/decision_003.md"
+    ]
+    assert intervention.intervention_id in card
+    assert "yield-endpoint" in card
+    assert "route-a" in card
+    assert "yield-v1" in card
+    assert portfolio.portfolio_id in card
+    assert "Shadow rank" in card
 
 
 def test_redaction_recurses_through_nested_payloads_and_strings():

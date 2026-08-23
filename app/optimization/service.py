@@ -127,6 +127,48 @@ def _nexus_top_k(
         return None
 
 
+def _suggestion_from_pool(pool: Any) -> CandidateSuggestion:
+    """Summarize an injected multi-source pool for top-level provenance."""
+    sources = tuple(dict.fromkeys(pool.sources_used))
+    backends = tuple(
+        dict.fromkeys(
+            candidate.generator_backend
+            for candidate in pool.candidates
+            if candidate.generator_backend
+        )
+    )
+    return CandidateSuggestion(
+        candidates=tuple(dict(candidate.params) for candidate in pool.candidates),
+        algorithm="+".join(backends) or "candidate_pool",
+        source="+".join(sources) or "candidate_pool",
+        rationale="Injected CandidatePoolService composed the arbitration portfolio.",
+        diagnostics={
+            "sources_used": list(sources),
+            "sources_dropped": list(pool.sources_dropped),
+            "candidate_count": len(pool.candidates),
+            # Preserve provider evidence before the hard gate. This keeps clone
+            # digests and provider fingerprints auditable even when a candidate
+            # is later rejected and therefore absent from the scored pool.
+            "candidate_provenance": [
+                {
+                    "params": dict(candidate.params),
+                    "source": candidate.source,
+                    "generator_backend": candidate.generator_backend,
+                    "rationale": candidate.rationale,
+                    "diagnostics": dict(candidate.diagnostics),
+                    "pool_status": status,
+                }
+                for status, candidates in (
+                    ("survived_pool_filters", pool.candidates),
+                    ("filtered_before_hard_gate", pool.filtered_out),
+                )
+                for candidate in candidates
+            ],
+            "construction_trace": list(pool.construction_trace),
+        },
+    )
+
+
 def arbitrate_next(
     request: OptimizationRequest,
     decision: StrategyDecision,
@@ -140,28 +182,28 @@ def arbitrate_next(
     config: ArbitrationConfig | None = None,
 ) -> OptimizationOutcome:
     """Build a multi-source candidate pool and arbitrate it under HELIOS authority."""
-    provider = provider if provider is not None else NexusOptimizationProvider()
-    fallback = fallback if fallback is not None else LocalFallbackProvider()
     policy = policy if policy is not None else OptimizationDecisionPolicy()
     provenance = provenance if provenance is not None else ProvenanceLogger()
     config = config if config is not None else ArbitrationConfig()
-    pool_builder = pool_builder if pool_builder is not None else CandidatePoolBuilder(config)
-
-    nexus_suggestion = _nexus_top_k(request, provider, config.k_nexus)
-    local_suggestion = fallback.suggest(request)
 
     if pool_service is not None:
         pool = pool_service.build_pool(request, decision)
+        primary = _suggestion_from_pool(pool)
     else:
+        provider = provider if provider is not None else NexusOptimizationProvider()
+        fallback = fallback if fallback is not None else LocalFallbackProvider()
+        pool_builder = pool_builder if pool_builder is not None else CandidatePoolBuilder(config)
+        nexus_suggestion = _nexus_top_k(request, provider, config.k_nexus)
+        local_suggestion = fallback.suggest(request)
         pool = pool_builder.build(
             request,
             decision,
             nexus_suggestion=nexus_suggestion,
             local_suggestion=local_suggestion,
         )
+        primary = nexus_suggestion if nexus_suggestion is not None else local_suggestion
     result = policy.arbitrate(pool, request, decision, config=config)
 
-    primary = nexus_suggestion if nexus_suggestion is not None else local_suggestion
     record = provenance.record(request, primary, result, strategy_decision=decision)
 
     return OptimizationOutcome(suggestion=primary, decision=result, provenance=record)

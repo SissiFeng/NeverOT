@@ -110,6 +110,14 @@ def persist_campaign_trajectory(
             "trace": accounting.trace.model_dump(mode="json"),
             "outcome": outcome.model_dump(mode="json"),
             "reward": accounting.reward.model_dump(mode="json"),
+            "interventions": [
+                item.model_dump(mode="json") for item in accounting.interventions
+            ],
+            "intervention_portfolio": (
+                accounting.intervention_portfolio.model_dump(mode="json")
+                if accounting.intervention_portfolio is not None
+                else None
+            ),
         },
     )
 

@@ -25,6 +25,7 @@ from app.contracts.scientific_evidence import (
     ScientificEvidenceBundle,
     ScientificEvidencePolicyMode,
 )
+from app.contracts.scientific_intervention import CampaignEndpointSpec
 from app.core.config import get_settings
 from app.services.adaptive_campaign_substrate import (
     build_adaptive_campaign_substrate_snapshot,
@@ -45,10 +46,14 @@ from app.services.decision_trace import CampaignDecisionTraceBuilder
 from app.services.pas_scientific_evidence import (
     PasScientificEvidenceAdapter,
     PasScientificEvidenceClient,
+    PasScientificEvidenceErrorType,
     unavailable_evidence_assessment,
 )
 from app.services.primitives_registry import get_registry
 from app.services.round_context import build_campaign_round_context
+from app.services.scientific_ledger_runtime import (
+    should_capture_decision_trace as _should_capture_decision_trace,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -86,12 +91,13 @@ def _maybe_collect_pas_scientific_evidence(
 ]:
     """Collect and validate PAS evidence behind independent, fail-closed gates."""
     settings = get_settings()
-    fetch_enabled = getattr(settings, "pas_evidence_fetch_enabled", False)
-    shadow_enabled = getattr(settings, "pas_evidence_shadow_enabled", False)
-    influence_enabled = getattr(settings, "pas_evidence_influence_enabled", False)
+    fetch_enabled = bool(getattr(settings, "pas_evidence_fetch_enabled", False))
+    shadow_enabled = bool(getattr(settings, "pas_evidence_shadow_enabled", False))
+    influence_enabled = bool(
+        getattr(settings, "pas_evidence_influence_enabled", False)
+    )
     if not (fetch_enabled or shadow_enabled or influence_enabled):
         return None, None, {"policy_mode": "off", "collected": False}
-
     policy_mode = (
         ScientificEvidencePolicyMode.BOUNDED
         if influence_enabled
@@ -99,45 +105,44 @@ def _maybe_collect_pas_scientific_evidence(
         if shadow_enabled
         else ScientificEvidencePolicyMode.OFF
     )
+    audit: dict[str, Any] = {
+        "policy_mode": policy_mode.value,
+        "collected": False,
+    }
     source = "supplied" if supplied_bundle is not None else "remote"
-    try:
-        value: Any
-        if supplied_bundle is not None:
-            value = supplied_bundle
-        elif fetch_enabled:
+    audit["source"] = source
+    value: Any = supplied_bundle
+    if value is None and fetch_enabled:
+        try:
             value = PasScientificEvidenceClient().query(dict(query_payload))
-        else:
-            return None, None, {
-                "policy_mode": policy_mode.value,
-                "collected": False,
-                "source": source,
-            }
-        advice = PasScientificEvidenceAdapter().adapt(
-            value,
-            policy_mode=policy_mode,
-        )
-        audit = {
-            "policy_mode": policy_mode.value,
-            "collected": advice.bundle is not None,
-            "source": source,
-            **advice.audit_metadata,
-        }
-        return advice.bundle, advice.assessment, audit
-    except Exception as exc:
-        logger.warning(
-            "PAS scientific evidence collection failed closed (%s)",
-            type(exc).__name__,
-        )
+        except Exception as exc:
+            logger.warning(
+                "PAS scientific evidence collection failed closed (%s)",
+                type(exc).__name__,
+                exc_info=True,
+            )
+            assessment = unavailable_evidence_assessment(
+                policy_mode=policy_mode,
+                reason="PAS scientific evidence collection is unavailable.",
+                error_type=PasScientificEvidenceErrorType.UNAVAILABLE,
+            )
+            audit["error_type"] = PasScientificEvidenceErrorType.UNAVAILABLE.value
+            audit["exception_type"] = type(exc).__name__
+            return None, assessment, audit
+
+    if value is None:
         assessment = unavailable_evidence_assessment(
             policy_mode=policy_mode,
-            reason=f"PAS scientific evidence unavailable ({type(exc).__name__}).",
+            reason="No PAS scientific evidence bundle was supplied or fetched.",
+            error_type=PasScientificEvidenceErrorType.UNAVAILABLE,
         )
-        return None, assessment, {
-            "policy_mode": policy_mode.value,
-            "collected": False,
-            "source": source,
-            "error_type": type(exc).__name__,
-        }
+        audit["error_type"] = PasScientificEvidenceErrorType.UNAVAILABLE.value
+        return None, assessment, audit
+
+    advice = PasScientificEvidenceAdapter().adapt(value, policy_mode=policy_mode)
+    audit.update(advice.audit_metadata)
+    audit["collected"] = advice.bundle is not None
+    return advice.bundle, advice.assessment, audit
 
 
 def _maybe_record_contextual_shadow_decision(
@@ -173,12 +178,15 @@ def _maybe_record_contextual_shadow_decision(
         authority_enabled = getattr(
             settings, "campaign_decision_authority_enabled", False
         )
+        drift_monitor_enabled = getattr(
+            settings, "closed_loop_drift_monitor_enabled", False
+        )
         pas_shadow_enabled = getattr(settings, "pas_evidence_shadow_enabled", False)
         pas_influence_enabled = getattr(
             settings, "pas_evidence_influence_enabled", False
         )
-        drift_monitor_enabled = getattr(
-            settings, "closed_loop_drift_monitor_enabled", False
+        intervention_shadow_enabled = getattr(
+            settings, "scientific_intervention_shadow_enabled", False
         )
         if (
             not shadow_enabled
@@ -187,6 +195,7 @@ def _maybe_record_contextual_shadow_decision(
             and not pas_shadow_enabled
             and not pas_influence_enabled
             and not drift_monitor_enabled
+            and not intervention_shadow_enabled
         ):
             return None
 
@@ -213,6 +222,26 @@ def _maybe_record_contextual_shadow_decision(
             metadata=metadata,
         )
         decision_plan = CampaignDecisionLayer().decide(context)
+        if scientific_evidence_assessment is not None:
+            decision_plan = decision_plan.model_copy(
+                deep=True,
+                update={
+                    "metadata": {
+                        **dict(decision_plan.metadata),
+                        "scientific_evidence_policy_mode": (
+                            scientific_evidence_assessment.policy_mode.value
+                        ),
+                        "scientific_evidence_status": (
+                            scientific_evidence_assessment.status.value
+                        ),
+                        "scientific_evidence_bundle_id": (
+                            scientific_evidence.bundle_id
+                            if scientific_evidence is not None
+                            else None
+                        ),
+                    }
+                },
+            )
         trace = CampaignDecisionTraceBuilder().build(
             context=context,
             decision_plan=decision_plan,
@@ -522,17 +551,21 @@ def _maybe_record_adaptive_campaign_substrate_snapshot(
     protocol_template: dict[str, Any] | None = None,
     safety_summary: dict[str, Any] | None = None,
     now: Any | None = None,
+    force_for_intervention: bool = False,
 ) -> Any | None:
     """Record the adaptive campaign substrate snapshot as a parallel shadow track.
 
     Strictly observational: it assembles the Phase 1-5 substrate artifact from
     read-only round inputs and logs it. It never affects routing, strategy
-    selection, candidate selection, or execution, and its return value is
-    intentionally ignored by the round loop. The VoI ranking inside the artifact
-    is advisory only. Failures are swallowed so the live campaign is unaffected.
+    selection, candidate selection, or execution. The returned snapshot may be
+    consumed by the shadow intervention portfolio; its VoI ranking remains
+    advisory only. Failures are swallowed so the live campaign is unaffected.
     """
     try:
-        if not get_settings().adaptive_substrate_shadow_enabled:
+        if (
+            not get_settings().adaptive_substrate_shadow_enabled
+            and not force_for_intervention
+        ):
             return None
 
         registry = get_registry()
@@ -568,6 +601,10 @@ def _maybe_record_adaptive_campaign_substrate_snapshot(
             now=now,
         )
         snapshot.metadata["available_capabilities_source"] = capabilities_source
+        snapshot.metadata["forced_for_scientific_intervention"] = bool(
+            force_for_intervention
+            and not get_settings().adaptive_substrate_shadow_enabled
+        )
 
         logger.info(
             "adaptive_campaign_substrate_snapshot %s",
@@ -577,6 +614,86 @@ def _maybe_record_adaptive_campaign_substrate_snapshot(
     except Exception:
         logger.warning(
             "Adaptive substrate shadow hook failed; continuing live campaign",
+            exc_info=True,
+        )
+        return None
+
+
+def _maybe_build_scientific_intervention_portfolio(
+    *,
+    campaign_id: str,
+    round_index: int,
+    decision_trace: Any | None,
+    objective_kpi: str,
+    direction: str,
+    target_value: float | None,
+    max_rounds: int,
+    batch_size: int,
+    explicit_endpoint: CampaignEndpointSpec | None,
+    candidates: list[dict[str, Any]],
+    route_graph: dict[str, Any] | None,
+    active_experimental_node_id: str | None,
+    experimental_route_decision: dict[str, Any] | None,
+    protocol_template: dict[str, Any],
+    protocol_pattern_id: str,
+    adaptive_campaign_snapshot: Any | None,
+    candidate_evidence: list[dict[str, Any]] | None,
+    available_capabilities: list[str] | None,
+    policy_snapshot: dict[str, Any] | None,
+    now: Any | None = None,
+) -> Any | None:
+    """Build the shadow portfolio; never alter candidate order or execution."""
+    try:
+        if not getattr(
+            get_settings(), "scientific_intervention_shadow_enabled", False
+        ):
+            return None
+        if decision_trace is None or not candidates:
+            return None
+
+        from app.services.scientific_intervention_portfolio import (
+            build_campaign_intervention_portfolio,
+        )
+
+        portfolio = build_campaign_intervention_portfolio(
+            campaign_id=campaign_id,
+            round_index=round_index,
+            decision_trace_id=decision_trace.trace_id,
+            objective_kpi=objective_kpi,
+            direction=direction,
+            target_value=target_value,
+            max_rounds=max_rounds,
+            batch_size=batch_size,
+            explicit_endpoint=explicit_endpoint,
+            candidates=candidates,
+            route_graph=route_graph,
+            active_experimental_node_id=active_experimental_node_id,
+            experimental_route_decision=experimental_route_decision,
+            protocol_template=protocol_template,
+            protocol_pattern_id=protocol_pattern_id,
+            adaptive_campaign_snapshot=adaptive_campaign_snapshot,
+            candidate_evidence=list(candidate_evidence or []),
+            available_capabilities=available_capabilities,
+            policy_snapshot=policy_snapshot,
+            created_at=now,
+        )
+        if portfolio is None:
+            logger.info(
+                "scientific_intervention_portfolio skipped: campaign=%s round=%s "
+                "reason=no_campaign_endpoint",
+                campaign_id,
+                round_index,
+            )
+            return None
+        logger.info(
+            "scientific_intervention_portfolio %s",
+            json.dumps(portfolio.portfolio.model_dump(mode="json"), sort_keys=True),
+        )
+        return portfolio
+    except Exception:
+        logger.warning(
+            "Scientific intervention portfolio hook failed; preserving live "
+            "candidate order",
             exc_info=True,
         )
         return None
@@ -596,6 +713,7 @@ class OrchestratorInput(BaseModel):
     batch_size: int
     strategy: str = "lhs"
     target_value: float | None = None
+    campaign_endpoint: CampaignEndpointSpec | None = None
 
     # Parameter space
     dimensions: list[dict[str, Any]]
@@ -721,8 +839,19 @@ class OrchestratorAgent(BaseAgent[OrchestratorInput, OrchestratorOutput]):
 
         # RL strategy router (optional — defaults to rule-based mode)
         try:
-            from app.services.strategy_router import StrategyRouter
-            self._strategy_router = StrategyRouter()
+            from app.core.config import get_settings
+            from app.services.strategy_router import RouterConfig, StrategyRouter
+
+            _settings = get_settings()
+            self._strategy_router = StrategyRouter(
+                RouterConfig(
+                    mode=_settings.strategy_router_mode,
+                    rl_backend=_settings.strategy_router_rl_backend,
+                    ab_test_rl_fraction=_settings.strategy_router_ab_fraction,
+                    confidence_threshold=_settings.strategy_router_confidence_threshold,
+                    explore=_settings.strategy_router_explore,
+                )
+            )
         except Exception:
             self._strategy_router = None
             logger.debug("Strategy router not available, using rule-based only", exc_info=True)
@@ -2189,10 +2318,15 @@ class OrchestratorAgent(BaseAgent[OrchestratorInput, OrchestratorOutput]):
                     ),
                 }
 
-            round_decision_trace = _maybe_record_contextual_shadow_decision(
-                **decision_context_kwargs,
-                actual_stage="candidate_generation",
-            )
+            if _should_capture_decision_trace() or getattr(
+                get_settings(), "closed_loop_drift_monitor_enabled", False
+            ):
+                round_decision_trace = _maybe_record_contextual_shadow_decision(
+                    **decision_context_kwargs,
+                    actual_stage="candidate_generation",
+                )
+            else:
+                round_decision_trace = None
             scientific_campaign_metadata = {
                 "objective": decision_context_kwargs["objective_summary"],
                 "constraints": decision_context_kwargs["constraint_summary"],
@@ -2212,17 +2346,23 @@ class OrchestratorAgent(BaseAgent[OrchestratorInput, OrchestratorOutput]):
                 policy_snapshot=scientific_policy_snapshot,
             )
 
-            # Parallel shadow track: adaptive campaign substrate snapshot.
-            # Independent of the contextual decision trace above; observational
-            # only, its return value is intentionally not consumed.
-            _maybe_record_adaptive_campaign_substrate_snapshot(
-                campaign_id=campaign_id,
-                round_index=round_num,
-                objective_kpi=input_data.objective_kpi,
-                max_rounds=input_data.max_rounds,
-                failure_event_dicts=failure_event_dicts,
-                protocol_template=round_protocol_template,
-                safety_summary=dict(input_data.policy_snapshot or {}),
+            # Parallel shadow track: action-space state can inform the shadow
+            # intervention portfolio but never changes the live candidate order.
+            adaptive_campaign_snapshot = (
+                _maybe_record_adaptive_campaign_substrate_snapshot(
+                    campaign_id=campaign_id,
+                    round_index=round_num,
+                    objective_kpi=input_data.objective_kpi,
+                    max_rounds=input_data.max_rounds,
+                    failure_event_dicts=failure_event_dicts,
+                    protocol_template=round_protocol_template,
+                    safety_summary=dict(input_data.policy_snapshot or {}),
+                    force_for_intervention=getattr(
+                        get_settings(),
+                        "scientific_intervention_shadow_enabled",
+                        False,
+                    ),
+                )
             )
 
             # Optional live campaign-decision authority. This is the promotion
@@ -2483,6 +2623,7 @@ class OrchestratorAgent(BaseAgent[OrchestratorInput, OrchestratorOutput]):
             # can neither downgrade the round nor break the campaign. With the
             # flag off, none of this runs and behavior is unchanged.
             arbitration_candidates: list[dict[str, Any]] | None = None
+            candidate_portfolio_evidence: list[dict[str, Any]] = []
             if stabilize_candidates is None and strategy_decision is not None:
                 try:
                     if get_settings().enable_candidate_arbitration:
@@ -2514,6 +2655,9 @@ class OrchestratorAgent(BaseAgent[OrchestratorInput, OrchestratorOutput]):
                             arbitration_candidates = [
                                 dict(c) for c in arb_outcome.decision.final_candidates
                             ]
+                            candidate_portfolio_evidence = list(
+                                arb_outcome.provenance.get("candidate_pool", []) or []
+                            )
                             self._emit(campaign_id, {
                                 "type": "candidate_arbitration",
                                 "round": round_num,
@@ -2671,7 +2815,81 @@ class OrchestratorAgent(BaseAgent[OrchestratorInput, OrchestratorOutput]):
                     "decision evidence recall failed; continuing", exc_info=True
                 )
 
+            round_intervention_portfolio = (
+                _maybe_build_scientific_intervention_portfolio(
+                    campaign_id=campaign_id,
+                    round_index=round_num,
+                    decision_trace=round_decision_trace,
+                    objective_kpi=input_data.objective_kpi,
+                    direction=input_data.direction,
+                    target_value=input_data.target_value,
+                    max_rounds=input_data.max_rounds,
+                    batch_size=planned_round.batch_size,
+                    explicit_endpoint=input_data.campaign_endpoint,
+                    candidates=[dict(item) for item in design_candidates],
+                    route_graph=route_graph,
+                    active_experimental_node_id=active_experimental_node_id,
+                    experimental_route_decision=experimental_route_decision_payload,
+                    protocol_template=round_protocol_template,
+                    protocol_pattern_id=round_protocol_pattern_id,
+                    adaptive_campaign_snapshot=adaptive_campaign_snapshot,
+                    candidate_evidence=candidate_portfolio_evidence,
+                    available_capabilities=input_data.available_capabilities,
+                    policy_snapshot=input_data.policy_snapshot,
+                )
+            )
+            round_interventions = (
+                list(round_intervention_portfolio.interventions)
+                if round_intervention_portfolio is not None
+                else []
+            )
+            if round_intervention_portfolio is not None:
+                _portfolio = round_intervention_portfolio.portfolio
+                self._emit(campaign_id, {
+                    "type": "scientific_intervention_portfolio",
+                    "round": round_num,
+                    "portfolio_id": _portfolio.portfolio_id,
+                    "intervention_ids": list(_portfolio.intervention_ids),
+                    "ranked_intervention_ids": list(
+                        _portfolio.ranked_intervention_ids
+                    ),
+                    "recommended_intervention_ids": list(
+                        _portfolio.recommended_intervention_ids
+                    ),
+                    "would_change_order": _portfolio.would_change_order,
+                    "shadow_only": True,
+                    "message": _portfolio.rationale,
+                })
+                agent_trace.append({
+                    "agent": "scientific_intervention_portfolio",
+                    "round": round_num,
+                    "portfolio_id": _portfolio.portfolio_id,
+                    "would_change_order": _portfolio.would_change_order,
+                    "live_candidate_order_preserved": True,
+                })
+
             # 2b. For each candidate, compile protocol
+            try:
+                from app.services.closed_loop_drift import (
+                    build_candidate_applicability_context,
+                )
+
+                candidate_applicability_context = (
+                    build_candidate_applicability_context(
+                        objective_kpi=input_data.objective_kpi,
+                        direction=input_data.direction,
+                        campaign_context=campaign_context_dict,
+                        protocol_pattern_id=round_protocol_pattern_id,
+                        strategy=round_strategy,
+                        backend=(strategy_decision_info or {}).get("backend"),
+                    )
+                )
+            except Exception:
+                logger.debug(
+                    "Candidate applicability context unavailable; recording empty",
+                    exc_info=True,
+                )
+                candidate_applicability_context = {}
             for i, candidate_params in enumerate(design_candidates):
                 # --- Checkpoint: candidate start + idempotent skip ---
                 try:
@@ -3089,6 +3307,12 @@ class OrchestratorAgent(BaseAgent[OrchestratorInput, OrchestratorOutput]):
                                 observations=[{"execution_error": str(exc)}],
                                 failures=terminal_failures,
                                 recovery_events=recovery_events,
+                                interventions=round_interventions,
+                                intervention_portfolio=(
+                                    round_intervention_portfolio.portfolio
+                                    if round_intervention_portfolio is not None
+                                    else None
+                                ),
                             )
                         )
                         if terminal_scientific_result is not None:
@@ -3231,6 +3455,7 @@ class OrchestratorAgent(BaseAgent[OrchestratorInput, OrchestratorOutput]):
                 # Accumulate step history for anomaly detection
                 step_history.append(step_result)
 
+                # Persist a bounded closed-loop observation for drift monitoring.
                 try:
                     from app.services.closed_loop_runtime import (
                         record_closed_loop_observation,
@@ -3644,6 +3869,12 @@ class OrchestratorAgent(BaseAgent[OrchestratorInput, OrchestratorOutput]):
                 observations=_analysis_observations,
                 failures=_round_failures,
                 recovery_events=_round_recovery_events,
+                interventions=round_interventions,
+                intervention_portfolio=(
+                    round_intervention_portfolio.portfolio
+                    if round_intervention_portfolio is not None
+                    else None
+                ),
             )
             if _scientific_result is not None:
                 ledger_result = _scientific_result.ledger_result

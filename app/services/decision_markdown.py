@@ -144,6 +144,16 @@ def _render_bundle(
         "trace": trace.model_dump(mode="json"),
         "outcome": accounting.outcome.model_dump(mode="json") if accounting else None,
         "reward": accounting.reward.model_dump(mode="json") if accounting else None,
+        "interventions": [
+            item.model_dump(mode="json") for item in accounting.interventions
+        ]
+        if accounting
+        else [],
+        "intervention_portfolio": (
+            accounting.intervention_portfolio.model_dump(mode="json")
+            if accounting and accounting.intervention_portfolio is not None
+            else None
+        ),
         "observations": list(observations),
         "failures": list(failures),
         "recovery_events": list(recovery_events),
@@ -247,6 +257,10 @@ def _render_decision_card(
         f"- Expected gain: {_expected_gain(actions, plan)}",
         f"- Fallback: {_safe_inline(plan.fallback_action.value if plan.fallback_action else 'None')}",
         f"- Shadow only: {'yes' if plan.shadow_only else 'no'}",
+        "",
+        "## Scientific Interventions",
+        "",
+        _intervention_table(trace, accounting),
         "",
         "## Outcome",
         "",
@@ -675,6 +689,71 @@ def _evidence_table(trace: CampaignDecisionTrace) -> str:
         )
     if not trace.evidence:
         lines.append("| — | — | No structured evidence was recorded. | — |")
+    return "\n".join(lines)
+
+
+def _intervention_table(
+    trace: CampaignDecisionTrace,
+    accounting: CampaignDecisionAccounting | None,
+) -> str:
+    if accounting is None or not accounting.interventions:
+        if trace.intervention_ids:
+            return "\n".join(
+                ["| Intervention ID | Status |", "|---|---|"]
+                + [
+                    f"| {_safe_table(intervention_id)} | pending details |"
+                    for intervention_id in trace.intervention_ids
+                ]
+            )
+        return "No scientific interventions were bound to this decision."
+    portfolio = accounting.intervention_portfolio
+    rank_by_id = (
+        {
+            intervention_id: rank
+            for rank, intervention_id in enumerate(
+                portfolio.ranked_intervention_ids,
+                start=1,
+            )
+        }
+        if portfolio is not None
+        else {}
+    )
+    recommended = (
+        set(portfolio.recommended_intervention_ids) if portfolio is not None else set()
+    )
+    lines: list[str] = []
+    if portfolio is not None:
+        lines.extend(
+            [
+                f"- Portfolio ID: {_safe_inline(portfolio.portfolio_id)}",
+                f"- Shadow reorders live batch: {'yes' if portfolio.would_change_order else 'no'}",
+                "- Live candidate order preserved: yes",
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            "| Intervention ID | Candidate | Shadow rank | Recommended | Endpoint | Route | Measurement | Feasibility | Utility |",
+            "|---|---:|---:|---|---|---|---|---|---:|",
+        ]
+    )
+    for intervention in accounting.interventions:
+        intervention_id = _safe_table(intervention.intervention_id)
+        endpoint_id = _safe_table(intervention.endpoint.endpoint_id)
+        route_id = _safe_table(intervention.synthesis_route.route_id)
+        protocol_id = _safe_table(intervention.measurement_protocol.protocol_id)
+        feasibility = _safe_table(intervention.feasibility.status.value)
+        utility = _safe_table(_format_scalar(intervention.utility.total_utility))
+        shadow_rank = rank_by_id.get(intervention.intervention_id)
+        rank_text = str(shadow_rank) if shadow_rank is not None else "-"
+        recommended_text = (
+            "yes" if intervention.intervention_id in recommended else "no"
+        )
+        lines.append(
+            f"| {intervention_id} | {intervention.candidate_index} | {rank_text} | "
+            f"{recommended_text} | {endpoint_id} | {route_id} | {protocol_id} | "
+            f"{feasibility} | {utility} |"
+        )
     return "\n".join(lines)
 
 

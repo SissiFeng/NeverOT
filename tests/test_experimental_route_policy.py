@@ -357,6 +357,7 @@ async def test_orchestrator_applies_route_and_records_route_labelled_observation
         "SCIENTIFIC_LEDGER_ROOT", str(tmp_path / "scientific-ledger")
     )
     monkeypatch.setenv("SCIENTIFIC_LEDGER_GIT_ENABLED", "false")
+    monkeypatch.setenv("SCIENTIFIC_INTERVENTION_SHADOW_ENABLED", "true")
     monkeypatch.setenv("NEXUS_EXPERIMENTAL_ROUTES_ENABLED", "true")
     monkeypatch.setenv("EXPERIMENTAL_ROUTE_AUTHORITY_ENABLED", "true")
     get_settings.cache_clear()
@@ -389,6 +390,7 @@ async def test_orchestrator_applies_route_and_records_route_labelled_observation
             direction="maximize",
             max_rounds=1,
             batch_size=1,
+            target_value=0.9,
             strategy="lhs",
             dry_run=True,
             campaign_id="camp-route-live",
@@ -424,6 +426,11 @@ async def test_orchestrator_applies_route_and_records_route_labelled_observation
         and event.get("applied") is True
         for event in events
     )
+    assert any(
+        event.get("type") == "scientific_intervention_portfolio"
+        and event.get("shadow_only") is True
+        for event in events
+    )
     from app.services.decision_trajectory import load_trajectories
 
     trajectory = next(
@@ -434,4 +441,12 @@ async def test_orchestrator_applies_route_and_records_route_labelled_observation
     route_trace = trajectory["trace"]["metadata"]["experimental_route_decision"]
     assert route_trace["selected_node_id"] == "alternate"
     assert route_trace["applied"] is True
+    assert trajectory["intervention_portfolio"]["shadow_only"] is True
+    assert trajectory["intervention_portfolio"]["provenance"][
+        "live_order_preserved"
+    ] is True
+    assert trajectory["interventions"][0]["synthesis_route"]["route_id"] == "alternate"
+    assert trajectory["interventions"][0]["endpoint"]["criteria"][0][
+        "metric_name"
+    ] == "yield"
     get_settings.cache_clear()

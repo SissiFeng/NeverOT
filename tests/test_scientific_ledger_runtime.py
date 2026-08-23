@@ -9,7 +9,11 @@ from app.services.scientific_ledger_runtime import (
     record_pending_scientific_decision,
     should_capture_decision_trace,
 )
-from tests.fixtures.scientific_ledger import decision_trace
+from tests.fixtures.scientific_ledger import (
+    decision_trace,
+    scientific_intervention,
+    scientific_intervention_portfolio,
+)
 
 
 @pytest.fixture
@@ -75,6 +79,106 @@ def test_runtime_bridge_persists_typed_accounting_when_markdown_disabled(
     assert len(load_trajectories("typed-only")) == 1
 
 
+def test_runtime_bridge_persists_batch_aware_scientific_interventions(runtime_env):
+    from app.services.decision_trajectory import load_trajectories
+
+    trace = decision_trace()
+    interventions = [
+        scientific_intervention(candidate_index=0),
+        scientific_intervention(candidate_index=1),
+    ]
+    portfolio = scientific_intervention_portfolio(interventions)
+    result = finalize_scientific_decision(
+        trace,
+        observed_action="propose_candidates",
+        candidate_count=2,
+        execution_success=True,
+        interventions=interventions,
+        intervention_portfolio=portfolio,
+    )
+
+    expected_ids = [item.intervention_id for item in interventions]
+    assert result.accounting.trace.intervention_ids == expected_ids
+    assert result.accounting.outcome.intervention_ids == expected_ids
+    assert [
+        item.intervention_id for item in result.accounting.interventions
+    ] == expected_ids
+    assert all(
+        item.decision_trace_id == trace.trace_id
+        for item in result.accounting.interventions
+    )
+    stored = load_trajectories(trace.campaign_id)[0]["trajectory"]
+    assert [item["intervention_id"] for item in stored["interventions"]] == expected_ids
+    assert stored["intervention_portfolio"]["portfolio_id"] == portfolio.portfolio_id
+
+    assert result.ledger_result is not None
+    card = (
+        Path(result.ledger_result.campaign_directory)
+        / "rounds/003/decision_003.md"
+    ).read_text()
+    assert "## Scientific Interventions" in card
+    assert interventions[0].intervention_id in card
+    assert portfolio.portfolio_id in card
+    assert "Shadow reorders live batch: yes" in card
+    assert "yield-endpoint" in card
+    assert "route-a" in card
+
+
+def test_runtime_bridge_rejects_intervention_from_another_campaign(runtime_env):
+    with pytest.raises(ValueError, match="campaign_id"):
+        finalize_scientific_decision(
+            decision_trace(),
+            interventions=[scientific_intervention(campaign_id="other-campaign")],
+        )
+
+
+def test_runtime_bridge_rejects_portfolio_with_mismatched_ids(runtime_env):
+    interventions = [scientific_intervention(candidate_index=0)]
+    portfolio = scientific_intervention_portfolio(
+        [
+            scientific_intervention(candidate_index=0),
+            scientific_intervention(candidate_index=1),
+        ]
+    )
+    with pytest.raises(ValueError, match="portfolio intervention ids"):
+        finalize_scientific_decision(
+            decision_trace(),
+            interventions=interventions,
+            intervention_portfolio=portfolio,
+        )
+
+
+def test_runtime_bridge_does_not_drop_prebound_intervention_ids(runtime_env):
+    trace = decision_trace().model_copy(
+        deep=True,
+        update={"intervention_ids": ["si-prebound"]},
+    )
+
+    with pytest.raises(ValueError, match="must match the decision trace"):
+        finalize_scientific_decision(trace)
+
+
+def test_runtime_bridge_allows_multiple_routes_for_one_candidate(runtime_env):
+    first = scientific_intervention(candidate_index=0)
+    route = first.synthesis_route.model_copy(
+        update={"route_id": "route-b", "route_name": "alternate synthesis route"}
+    )
+    second = first.model_copy(
+        deep=True,
+        update={
+            "intervention_id": f"{first.intervention_id}-route-b",
+            "synthesis_route": route,
+        },
+    )
+
+    result = finalize_scientific_decision(
+        decision_trace(),
+        interventions=[first, second],
+    )
+
+    assert [item.candidate_index for item in result.accounting.interventions] == [0, 0]
+
+
 def test_runtime_finalize_aligns_trace_with_observed_action(runtime_env):
     trace = decision_trace()
     result = finalize_scientific_decision(
@@ -108,6 +212,18 @@ def test_trace_capture_gate_includes_live_authority(runtime_env, monkeypatch):
     monkeypatch.setenv("SCIENTIFIC_LEDGER_ENABLED", "false")
     monkeypatch.setenv("CONTEXTUAL_DECISION_SHADOW_ENABLED", "false")
     monkeypatch.setenv("CAMPAIGN_DECISION_AUTHORITY_ENABLED", "true")
+    get_settings.cache_clear()
+
+    assert should_capture_decision_trace() is True
+
+
+def test_trace_capture_gate_includes_intervention_shadow(runtime_env, monkeypatch):
+    from app.core.config import get_settings
+
+    monkeypatch.setenv("SCIENTIFIC_LEDGER_ENABLED", "false")
+    monkeypatch.setenv("CONTEXTUAL_DECISION_SHADOW_ENABLED", "false")
+    monkeypatch.setenv("CAMPAIGN_DECISION_AUTHORITY_ENABLED", "false")
+    monkeypatch.setenv("SCIENTIFIC_INTERVENTION_SHADOW_ENABLED", "true")
     get_settings.cache_clear()
 
     assert should_capture_decision_trace() is True

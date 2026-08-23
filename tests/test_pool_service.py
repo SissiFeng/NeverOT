@@ -9,8 +9,6 @@ penalty.  The hard constraint gate and advisor hints live downstream in
 """
 from __future__ import annotations
 
-import pytest
-
 from app.optimization.pool_service import CandidatePoolService
 from app.optimization.schemas import CandidateSuggestion, OptimizationRequest
 from app.services.candidate_gen import ParameterSpace, SearchDimension
@@ -79,6 +77,13 @@ def test_service_applies_failure_zone_penalty():
     assert {"x0": 0.4, "x1": 0.4} in kept
     assert {"x0": 0.8, "x1": 0.8} not in kept
     assert any("failure-zone re-rank" in note for note in pool.construction_trace)
+    assert [candidate.params for candidate in pool.filtered_out] == [
+        {"x0": 0.8, "x1": 0.8}
+    ]
+    assert (
+        pool.filtered_out[0].diagnostics["pool_filter_reason"]
+        == "learned_failure_region_rank_limit"
+    )
 
 
 def test_service_never_returns_empty_even_if_all_failure_prone():
