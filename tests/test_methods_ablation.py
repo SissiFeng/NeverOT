@@ -656,6 +656,7 @@ def test_apriori_freezing_studies_declare_four_method_levels_and_new_pathologies
     }
     assert four_levels <= set(continuous.matrix.config_names)
     assert four_levels <= set(route.matrix.config_names)
+    assert "helios_full/no-execution-utility" in route.matrix.config_names
     assert {bundle.id for bundle in continuous.matrix.bundles} >= {
         "clean",
         "exec_failure",
@@ -681,6 +682,7 @@ def test_capability_manifest_keeps_shadow_and_physical_boundaries_explicit():
             "agent_recommender",
             "helios_full",
             "helios_full/no-failure-memory",
+            "helios_full/no-execution-utility",
         )
     )
     profiles = {profile["method"]: profile for profile in manifest["methods"]}
@@ -696,6 +698,11 @@ def test_capability_manifest_keeps_shadow_and_physical_boundaries_explicit():
     assert profiles["helios_full"]["capabilities"]["physical_execution"] == "not_modeled"
     assert (
         profiles["helios_full/no-failure-memory"]["capabilities"]["failure_memory"]
+        == "disabled_by_ablation"
+    )
+    assert (
+        profiles["helios_full/no-execution-utility"]["capabilities"]
+        ["execution_aware_routing"]
         == "disabled_by_ablation"
     )
 

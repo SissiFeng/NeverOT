@@ -37,6 +37,7 @@ class AblationConfig:
     failure_memory: bool = True            # snapshot + learned failure-region guard
     observation_correction: bool = True    # corrected/true-objective rewriting
     constraint_controller: bool = True     # early-stage anchors + danger-zone filter
+    execution_aware_routing: bool = True   # rerank after observed route-switch cost
 
 
 BACKEND_VARIANTS: dict[str, AblationConfig] = {
@@ -45,6 +46,7 @@ BACKEND_VARIANTS: dict[str, AblationConfig] = {
     "helios_full/no-failure-memory": AblationConfig(failure_memory=False),
     "helios_full/no-observation-correction": AblationConfig(observation_correction=False),
     "helios_full/no-constraint-controller": AblationConfig(constraint_controller=False),
+    "helios_full/no-execution-utility": AblationConfig(execution_aware_routing=False),
 }
 
 
@@ -88,10 +90,27 @@ class HeliosFullPortfolioBackend:
 
         def _guided(proposed: list[dict[str, Any]]) -> list[dict[str, Any]]:
             """Apply the constraint controller (anchors + danger-zone filter)."""
-            guided = proposed[:n]
+            if ablation.execution_aware_routing:
+                guided, route_evidence = _apply_execution_aware_route_utility(
+                    proposed,
+                    space,
+                    working_observations,
+                    n=n,
+                )
+            else:
+                guided = proposed[:n]
+                route_evidence = {
+                    "execution_aware_route_utility_enabled": False,
+                    "known_route_switch_cost": 0.0,
+                    "route_candidates_considered": len(proposed),
+                    "route_candidates_reranked": False,
+                    "route_parameters": [],
+                    "selected_route_switches": 0,
+                }
+            self.last_decision_evidence.update(route_evidence)
             if ablation.constraint_controller:
                 anchored = _with_early_stage_anchors(
-                    proposed,
+                    guided,
                     report,
                     space,
                     working_observations,
@@ -155,9 +174,15 @@ class HeliosFullPortfolioBackend:
                         if decision.actions_considered
                         else f"{decision.phase}:{candidate}"
                     )
+                proposal_count = _execution_aware_proposal_count(
+                    space,
+                    working_observations,
+                    n=n,
+                    enabled=ablation.execution_aware_routing,
+                )
                 proposed = get_backend(candidate).suggest(
                     space,
-                    n,
+                    proposal_count,
                     working_observations,
                     seed=seed,
                     **kwargs,
@@ -386,6 +411,110 @@ def _apply_failure_memory(
         "known_failure_points": len(failed),
         "failure_prone_proposals_removed": len(candidates) - len(retained),
     }
+
+
+def _apply_execution_aware_route_utility(
+    candidates: list[dict[str, Any]],
+    space: ParameterSpace,
+    observations: list[Observation],
+    *,
+    n: int,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Rerank a backend pool only after a route-switch cost is observed.
+
+    The backend order is the scientific-value proxy.  Its normalized rank is
+    combined with the bounded, empirically observed switching cost.  With no
+    explicit cost marker this function is inert, preserving the clean GP-BO
+    control exactly and avoiding an a-priori route penalty.
+    """
+    switch_cost, route_parameters = _observed_route_switch_evidence(
+        space, observations
+    )
+    base_evidence: dict[str, Any] = {
+        "execution_aware_route_utility_enabled": True,
+        "known_route_switch_cost": switch_cost,
+        "route_candidates_considered": len(candidates),
+        "route_candidates_reranked": False,
+        "route_parameters": route_parameters,
+        "selected_route_switches": 0,
+    }
+    if (
+        not candidates
+        or switch_cost <= 0.0
+        or not route_parameters
+        or not observations
+    ):
+        return candidates[:n], base_evidence
+
+    current = observations[-1].params
+    pool_size = len(candidates)
+    bounded_switch_cost = switch_cost / (1.0 + switch_cost)
+    scored: list[tuple[float, int, bool, dict[str, Any]]] = []
+    for rank, candidate in enumerate(candidates):
+        scientific_rank_value = 1.0 - (rank / max(pool_size, 1))
+        switches_route = any(
+            candidate.get(parameter) != current.get(parameter)
+            for parameter in route_parameters
+        )
+        decision_utility = scientific_rank_value - (
+            bounded_switch_cost if switches_route else 0.0
+        )
+        scored.append((decision_utility, rank, switches_route, candidate))
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    selected_rows = scored[:n]
+    selected = [dict(item[3]) for item in selected_rows]
+    base_evidence.update(
+        {
+            "route_candidates_reranked": selected != candidates[:n],
+            "selected_route_switches": sum(1 for item in selected_rows if item[2]),
+        }
+    )
+    return selected, base_evidence
+
+
+def _observed_route_switch_evidence(
+    space: ParameterSpace,
+    observations: list[Observation],
+) -> tuple[float, list[str]]:
+    categorical = {
+        dimension.param_name
+        for dimension in space.dimensions
+        if dimension.choices is not None
+        or dimension.param_type in {"categorical", "boolean"}
+    }
+    route_parameters: set[str] = set()
+    costs: list[float] = []
+    previous: Observation | None = None
+    for observation in observations:
+        raw_cost = (observation.objectives or {}).get("route_switch_cost")
+        if raw_cost is not None and float(raw_cost) > 0.0:
+            costs.append(float(raw_cost))
+            if previous is not None:
+                route_parameters.update(
+                    parameter
+                    for parameter in categorical
+                    if previous.params.get(parameter)
+                    != observation.params.get(parameter)
+                )
+        previous = observation
+    if costs and not route_parameters and len(categorical) == 1:
+        route_parameters.update(categorical)
+    return (max(costs, default=0.0), sorted(route_parameters))
+
+
+def _execution_aware_proposal_count(
+    space: ParameterSpace,
+    observations: list[Observation],
+    *,
+    n: int,
+    enabled: bool,
+) -> int:
+    if not enabled:
+        return n
+    switch_cost, route_parameters = _observed_route_switch_evidence(
+        space, observations
+    )
+    return max(n, 8) if switch_cost > 0.0 and route_parameters else n
 
 
 def _objective_level_for_report(risk_flags: set[str]) -> ObjectiveLevel:

@@ -426,6 +426,10 @@ class RouteSwitchCost(PathologySpec):
         return dataclasses.replace(
             evaluation,
             observed_value=observed,
+            objective_values={
+                **evaluation.objective_values,
+                "route_switch_cost": self.switching_cost,
+            },
             metadata={
                 **evaluation.metadata,
                 "resource_cost": float(evaluation.metadata.get("resource_cost", 0.0))

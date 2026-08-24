@@ -206,6 +206,7 @@ def test_route_switch_cost_is_observed_but_does_not_change_true_regret():
     assert switched.raw_value == pytest.approx(1.5)
     assert switched.observed_value == pytest.approx(3.5)
     assert switched.metadata["resource_cost"] == pytest.approx(2.0)
+    assert switched.objective_values["route_switch_cost"] == pytest.approx(2.0)
     assert retained.observed_value == pytest.approx(1.5)
     events = [event for event in state.events if event.event_type == "route_switch_cost"]
     assert len(events) == 1

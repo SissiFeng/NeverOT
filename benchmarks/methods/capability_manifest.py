@@ -45,6 +45,7 @@ def _baseline_profile(method: str) -> BenchmarkCapabilityProfile:
             "failure_memory",
             "observation_correction",
             "constraint_controller",
+            "execution_aware_routing",
             "scientific_intervention_ranking",
             "distributional_failure_attribution",
             "physical_execution",
@@ -79,6 +80,9 @@ def _helios_profile(method: str) -> BenchmarkCapabilityProfile:
         ),
         "constraint_controller": (
             "active" if config.constraint_controller else "disabled_by_ablation"
+        ),
+        "execution_aware_routing": (
+            "active" if config.execution_aware_routing else "disabled_by_ablation"
         ),
         "scientific_intervention_ranking": "shadow_only",
         "distributional_failure_attribution": "shadow_only",

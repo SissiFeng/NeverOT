@@ -4,12 +4,14 @@ import app.optimization  # noqa: F401
 import benchmarks.methods.helios_full  # noqa: F401
 from app.services.optimization_backends import Observation, get_backend, list_backends
 from benchmarks.methods.helios_full import (
+    _apply_execution_aware_route_utility,
     _apply_failure_memory,
     _early_stage_anchor_candidates,
     _early_stage_report,
     _observations_for_helios,
     _primary_backend_for_benchmark,
 )
+from benchmarks.methods.pathologies import RouteSwitchCost, apply_pathology
 from benchmarks.methods.problems import get_problem
 from benchmarks.methods.runner import run_cell
 
@@ -175,6 +177,7 @@ def test_backend_variants_all_registered():
         "helios_full/no-failure-memory",
         "helios_full/no-observation-correction",
         "helios_full/no-constraint-controller",
+        "helios_full/no-execution-utility",
     }
     for name in BACKEND_VARIANTS:
         assert backends[name] is True
@@ -196,6 +199,112 @@ def test_variant_ablation_configs_wired():
         get_backend("helios_full/no-constraint-controller").ablation.constraint_controller
         is False
     )
+    assert (
+        get_backend("helios_full/no-execution-utility").ablation.execution_aware_routing
+        is False
+    )
+
+
+def test_execution_aware_route_utility_uses_observed_switch_cost():
+    problem = get_problem("mixed_categorical")
+    observations = [
+        Observation(
+            params={"shape": "circle", "x": 0.2},
+            objective=-0.09,
+            objectives={"true_objective": -0.09},
+        ),
+        Observation(
+            params={"shape": "square", "x": 0.2},
+            objective=-3.59,
+            objectives={
+                "true_objective": -1.59,
+                "route_switch_cost": 2.0,
+            },
+        ),
+    ]
+    proposed = [
+        {"shape": "circle", "x": 0.5},
+        {"shape": "square", "x": 0.5},
+        {"shape": "triangle", "x": 0.5},
+    ]
+
+    selected, evidence = _apply_execution_aware_route_utility(
+        proposed,
+        problem.space,
+        observations,
+        n=1,
+    )
+
+    assert selected == [{"shape": "square", "x": 0.5}]
+    assert evidence == {
+        "execution_aware_route_utility_enabled": True,
+        "known_route_switch_cost": 2.0,
+        "route_candidates_considered": 3,
+        "route_candidates_reranked": True,
+        "route_parameters": ["shape"],
+        "selected_route_switches": 0,
+    }
+
+
+def test_execution_aware_route_utility_is_inert_without_cost_evidence():
+    problem = get_problem("mixed_categorical")
+    proposed = [
+        {"shape": "circle", "x": 0.5},
+        {"shape": "square", "x": 0.5},
+    ]
+
+    selected, evidence = _apply_execution_aware_route_utility(
+        proposed,
+        problem.space,
+        [],
+        n=1,
+    )
+
+    assert selected == proposed[:1]
+    assert evidence["known_route_switch_cost"] == 0.0
+    assert evidence["route_candidates_reranked"] is False
+
+
+def test_execution_aware_route_utility_is_wired_through_benchmark_loop():
+    problem, _ = apply_pathology(
+        get_problem("mixed_categorical"),
+        [RouteSwitchCost(route_parameter="shape", switching_cost=2.0)],
+        seed=0,
+    )
+
+    trace = run_cell(problem, "helios_full", seed=0, budget=6, n_init=3)
+
+    assert trace.error is None
+    active = [
+        evidence
+        for evidence in trace.backend_decision_history
+        if evidence.get("known_route_switch_cost", 0.0) > 0.0
+    ]
+    assert active
+    assert active[0]["route_candidates_considered"] == 8
+    assert active[0]["route_candidates_reranked"] is True
+
+    ablated_problem, _ = apply_pathology(
+        get_problem("mixed_categorical"),
+        [RouteSwitchCost(route_parameter="shape", switching_cost=2.0)],
+        seed=0,
+    )
+    ablated = run_cell(
+        ablated_problem,
+        "helios_full/no-execution-utility",
+        seed=0,
+        budget=6,
+        n_init=3,
+    )
+    full_cost = sum(
+        float(row["metadata"].get("resource_cost", 0.0))
+        for row in trace.evaluation_history
+    )
+    ablated_cost = sum(
+        float(row["metadata"].get("resource_cost", 0.0))
+        for row in ablated.evaluation_history
+    )
+    assert full_cost < ablated_cost
 
 
 def test_no_strategy_variant_uses_fixed_primary_backend():

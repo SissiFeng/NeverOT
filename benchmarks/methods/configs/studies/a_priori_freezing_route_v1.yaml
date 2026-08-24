@@ -26,6 +26,7 @@ configs:
   - gp_backend
   - agent_recommender
   - helios_full
+  - helios_full/no-execution-utility
 
 seeds: "0..19"
 budget: 30
@@ -34,6 +35,16 @@ reference: helios_full
 comparison_families:
   method_levels:
     methods: [predictor_ranker, gp_backend, agent_recommender]
+    metrics:
+      - final_regret
+      - regret_auc
+      - endpoint_attained
+      - evals_to_target_censored
+      - resource_cost
+  route_mechanism:
+    pathologies: [route_switch_cost]
+    contrasts:
+      - [helios_full, helios_full/no-execution-utility]
     metrics:
       - final_regret
       - regret_auc
