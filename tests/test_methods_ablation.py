@@ -733,7 +733,7 @@ def test_manifest_records_environment_provenance(tmp_path):
     assert manifest["git_dirty"] is False or manifest["git_diff_hash"]
     assert manifest["python_version"]
     assert manifest["dependency_lock_hash"]
-    assert manifest["pathology_schema_version"] == 2
+    assert manifest["pathology_schema_version"] == 3
     assert manifest["metric_schema_version"] == 1
 
 

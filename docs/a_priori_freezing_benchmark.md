@@ -30,7 +30,7 @@ The study uses four deliberately different scopes:
 | `predictor_ranker` | Rank a fixed candidate pool by a deterministic predictor; no acquisition function |
 | `gp_backend` | Fixed Gaussian-process Bayesian optimization |
 | `agent_recommender` | Deterministic recommendation heuristic; no execution or campaign authority and no live LLM |
-| `helios_full` | Benchmark strategy router with observable endpoint correction, failure memory, and constraint guards |
+| `helios_full` | Benchmark strategy router with observable endpoint correction, failure memory, constraint guards, and evidence-triggered execution-aware route utility |
 
 `capability_manifest.json` records which capabilities are active, disabled by an
 ablation, shadow-only, or not modelled for every method. In particular,
@@ -42,7 +42,13 @@ shadow-only, while physical execution is not modelled.
 The continuous study includes a clean negative control, spatial execution
 failure, a bounded instrument outage, proxy-gap shift, objective shift, noise
 drift, and censoring. The route study treats a categorical synthesis route as an
-action and charges an observed cost when that route changes.
+action and charges an observed cost when that route changes. The cost is added
+to the observation contract as explicit execution evidence. After the first
+observed switch, HELIOS requests a small ranked candidate pool and combines
+normalized scientific rank with the bounded switching cost; before such
+evidence, it preserves the underlying BO order exactly. The
+`helios_full/no-execution-utility` ablation tests this response rather than
+assuming route awareness from the schema alone.
 
 The simulator always retains an untouched raw objective as a common regret
 ruler. Selected observation-stage pathologies also expose a synthetic endpoint

@@ -38,7 +38,7 @@ from benchmarks.methods.problems import OptProblem, ProblemEvaluation
 # ---------------------------------------------------------------------------
 
 # Version of the pathology event/spec contract; recorded in study manifests.
-PATHOLOGY_SCHEMA_VERSION = 2
+PATHOLOGY_SCHEMA_VERSION = 3
 
 CAPABILITY_BY_KIND = {
     "noise_drift": "observation_robustness",
