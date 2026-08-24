@@ -1,0 +1,90 @@
+schema_version: 1
+study_name: a-priori-freezing-continuous-v1
+description: >
+  Seed-paired comparison of prediction-only ranking, fixed GP-BO, a
+  recommendation-only heuristic, and HELIOS under stationary and controlled
+  non-stationary conditions. Raw objective values remain the common regret
+  ruler; every disturbance writes a ground-truth event ledger.
+
+metrics_config: benchmarks/methods/configs/pathology_metrics_v2.yaml
+
+problem_groups:
+  continuous:
+    - sphere_2d
+    - branin
+    - rosenbrock_2d
+
+pathologies:
+  - id: clean
+    specs: []
+  - id: exec_failure
+    specs:
+      - type: spatial_failure
+        params:
+          center: {x1: 0.5, x2: 0.5}
+          radius: 0.3
+          p_max: 0.85
+          p_base: 0.05
+          observed_penalty: 8.0
+  - id: instrument_outage
+    specs:
+      - type: instrument_outage
+        params:
+          start_eval: 10
+          duration: 3
+          instrument_id: simulated_potentiostat
+          observed_penalty: 8.0
+  - id: proxy_shift
+    specs:
+      - type: proxy_gap_shift
+        params: {shift_eval: 12, bias: 4.0, scale: 1.0}
+  - id: objective_shift
+    specs:
+      - type: objective_shift
+        params:
+          shift_eval: 12
+          delta: {x1: 0.15, x2: -0.10}
+  - id: noise_drift
+    specs:
+      - type: noise_drift
+        params: {start_eval: 8, rate: 0.25, mode: linear}
+  - id: censoring
+    specs:
+      - type: censoring
+        params: {lod: 1.5}
+
+configs:
+  - predictor_ranker
+  - gp_backend
+  - agent_recommender
+  - helios_full
+  - helios_full/no-strategy
+  - helios_full/no-failure-memory
+  - helios_full/no-observation-correction
+  - lhs
+
+seeds: "0..19"
+budget: 30
+reference: helios_full
+
+comparison_families:
+  method_levels:
+    methods: [predictor_ranker, gp_backend, agent_recommender, lhs]
+    metrics:
+      - final_regret
+      - dynamic_regret_auc
+      - endpoint_attained
+      - evals_to_target_censored
+      - failed_experiments
+  failure_mechanism:
+    pathologies: [exec_failure, instrument_outage]
+    contrasts:
+      - [helios_full, helios_full/no-failure-memory]
+      - [helios_full, helios_full/no-strategy]
+    metrics: [recovery_success, recovery_efficiency, failed_experiments]
+  drift_mechanism:
+    pathologies: [proxy_shift, objective_shift, noise_drift, censoring]
+    contrasts:
+      - [helios_full, helios_full/no-strategy]
+      - [helios_full, helios_full/no-observation-correction]
+    metrics: [adaptation_lag, dynamic_regret_auc, final_epoch_regret]

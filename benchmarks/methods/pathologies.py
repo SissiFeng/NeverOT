@@ -2,7 +2,8 @@
 
 Wraps a clean :class:`~benchmarks.methods.problems.OptProblem` with realistic
 experimental corruptions (observation drift, spatially correlated execution
-failure, censoring, measurement-model shift, objective shift) without touching
+failure, bounded outage, route-switch cost, censoring, measurement-model shift,
+objective shift) without touching
 the study runner or any backend: ``apply_pathology`` returns a **new**
 ``OptProblem`` whose evaluator is a stateful closure, so the runner still sees
 an ordinary problem.
@@ -13,6 +14,9 @@ Contract (docs/plans/2026-07-22-pathology-benchmark-evaluation-layer-design.md):
   Pathologies act on ``observed_value`` / success flags / metadata.  The one
   exception is :class:`ObjectiveShift`, which *translates* the landscape
   (the argmin moves) while preserving the optimum **value**.
+- Observation-stage pathologies may declare a synthetic, independently
+  available endpoint channel. HELIOS may consume it only after successful,
+  quality-controlled evaluation.
 - Every triggered condition appends a ground-truth :class:`PathologyEvent` to
   ``PathologyState.events`` -- the ruler for all adaptation metrics.
 - Determinism: identical ``(specs, seed)`` produce identical event ledgers and
@@ -34,11 +38,13 @@ from benchmarks.methods.problems import OptProblem, ProblemEvaluation
 # ---------------------------------------------------------------------------
 
 # Version of the pathology event/spec contract; recorded in study manifests.
-PATHOLOGY_SCHEMA_VERSION = 1
+PATHOLOGY_SCHEMA_VERSION = 2
 
 CAPABILITY_BY_KIND = {
     "noise_drift": "observation_robustness",
     "spatial_failure": "execution_resilience",
+    "instrument_outage": "instrument_recovery",
+    "route_switch_cost": "execution_aware_routing",
     "censoring": "partial_observability",
     "proxy_gap_shift": "measurement_model_adaptation",
     "objective_shift": "campaign_adaptation",
@@ -202,6 +208,10 @@ class NoiseDrift(PathologySpec):
         return dataclasses.replace(
             evaluation,
             observed_value=observed,
+            objective_values={
+                **evaluation.objective_values,
+                "endpoint_observed": 1.0,
+            },
             metadata={**evaluation.metadata, "noise_drift_bias": bias},
         )
 
@@ -260,6 +270,10 @@ class SpatialFailure(PathologySpec):
             execution_success=False,
             qc_passed=False,
             failure_type=FAILURE_TYPE,
+            objective_values={
+                **evaluation.objective_values,
+                "failure_region_applicable": 1.0,
+            },
             metadata={**evaluation.metadata, "failure_probability": p},
         )
 
@@ -292,6 +306,10 @@ class Censoring(PathologySpec):
         return dataclasses.replace(
             evaluation,
             observed_value=self.lod,
+            objective_values={
+                **evaluation.objective_values,
+                "endpoint_observed": 1.0,
+            },
             metadata={**evaluation.metadata, "censored": True},
         )
 
@@ -326,7 +344,94 @@ class ProxyGapShift(PathologySpec):
         return dataclasses.replace(
             evaluation,
             observed_value=observed,
+            objective_values={
+                **evaluation.objective_values,
+                "endpoint_observed": 1.0,
+            },
             metadata={**evaluation.metadata, "proxy_gap_shifted": True},
+        )
+
+
+@dataclass(frozen=True)
+class InstrumentOutage(PathologySpec):
+    """Bounded instrument outage after a declared number of evaluations."""
+
+    start_eval: int = 10
+    duration: int = 3
+    instrument_id: str = "instrument"
+    observed_penalty: float = 5.0
+
+    kind = "instrument_outage"
+
+    def transform_evaluation(self, state, params, evaluation, space):
+        elapsed = state.eval_count - self.start_eval
+        if elapsed <= 0 or elapsed > self.duration:
+            return evaluation
+        if elapsed == 1:
+            state.record_event(
+                self.kind,
+                severity=1.0,
+                duration=self.duration,
+                region=None,
+                params=params,
+                details={
+                    "instrument_id": self.instrument_id,
+                    "start_eval": self.start_eval,
+                },
+            )
+        observed = float(evaluation.optimizer_value) + self.observed_penalty
+        return dataclasses.replace(
+            evaluation,
+            observed_value=observed,
+            execution_success=False,
+            qc_passed=False,
+            failure_type="pathology_instrument_outage",
+            metadata={
+                **evaluation.metadata,
+                "instrument_id": self.instrument_id,
+                "instrument_outage": True,
+            },
+        )
+
+
+@dataclass(frozen=True)
+class RouteSwitchCost(PathologySpec):
+    """Charge an observed execution cost when a route-like choice changes."""
+
+    route_parameter: str = "route"
+    switching_cost: float = 1.0
+
+    kind = "route_switch_cost"
+
+    def transform_evaluation(self, state, params, evaluation, space):
+        current = params.get(self.route_parameter)
+        if current is None or not state.history:
+            return evaluation
+        previous = state.history[-1]["params"].get(self.route_parameter)
+        if previous == current:
+            return evaluation
+        state.record_event(
+            self.kind,
+            severity=self.switching_cost,
+            duration=1,
+            region=None,
+            params=params,
+            details={
+                "from_route": str(previous),
+                "route_parameter": self.route_parameter,
+                "to_route": str(current),
+            },
+        )
+        observed = float(evaluation.optimizer_value) + self.switching_cost
+        return dataclasses.replace(
+            evaluation,
+            observed_value=observed,
+            metadata={
+                **evaluation.metadata,
+                "resource_cost": float(evaluation.metadata.get("resource_cost", 0.0))
+                + self.switching_cost,
+                "route_switch_cost": self.switching_cost,
+            },
         )
 
 
@@ -371,7 +476,15 @@ class ObjectiveShift(PathologySpec):
 
 SPEC_TYPES: dict[str, type[PathologySpec]] = {
     spec.kind: spec
-    for spec in (NoiseDrift, SpatialFailure, Censoring, ProxyGapShift, ObjectiveShift)
+    for spec in (
+        NoiseDrift,
+        SpatialFailure,
+        InstrumentOutage,
+        RouteSwitchCost,
+        Censoring,
+        ProxyGapShift,
+        ObjectiveShift,
+    )
 }
 # Also accept class names in study configs ("NoiseDrift" == "noise_drift").
 SPEC_TYPES.update({cls.__name__: cls for cls in tuple(SPEC_TYPES.values())})

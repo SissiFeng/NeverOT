@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+from pathlib import Path
 
 import pytest
 
@@ -78,6 +79,21 @@ def test_recovery_efficiency_skips_events_too_close_to_boundary():
     assert result.per_event == []
     assert result.skipped == 1
     assert result.mean_ratio is None
+
+
+def test_recovery_success_rate_uses_event_ground_truth_and_fixed_window():
+    from benchmarks.methods.ablation import recovery_success_rate
+
+    result = recovery_success_rate(
+        [3.0, 2.0, 10.0, 4.0, 2.05, 5.0],
+        [_event("instrument_outage", 3)],
+        window=2,
+        tolerance=0.1,
+    )
+
+    assert result.success_rate == pytest.approx(1.0)
+    assert result.per_event == [True]
+    assert result.skipped == 0
 
 
 def test_adaptation_lag_exact_recovery_point():
@@ -401,11 +417,27 @@ def test_write_study_artifacts_round_trip(tmp_path):
     assert metrics["failed_cells"] == 0
     assert isinstance(metrics["skipped_metrics"], list)
     assert len(metrics["cells"]) == 4
+    cell_metrics = metrics["cells"][0]["metrics"]
+    assert isinstance(cell_metrics["endpoint_attained"], bool)
+    assert isinstance(cell_metrics["evals_to_target_censored"], int)
+    assert isinstance(cell_metrics["failed_experiments"], int)
+    assert cell_metrics["simulated_decision_to_outcome_time_s"] >= 0.0
+    assert "resource_cost" in cell_metrics
+    assert "human_interventions" in cell_metrics
+    assert "recovery_success" in cell_metrics
 
     assert (study_dir / "traces" / "cell_0001.jsonl").exists()
     assert (study_dir / "events" / "cell_0001.events.jsonl").exists()
     assert (study_dir / "tables" / "main_benchmark.csv").exists()
     assert (study_dir / "tables" / "mechanism_analysis.csv").exists()
+    assert (study_dir / "tables" / "system_endpoints.csv").exists()
+    assert (study_dir / "capability_manifest.json").exists()
+    trace_payload = json.loads(next((study_dir / "traces").glob("*.jsonl")).read_text())
+    assert "backend_decision_history" in trace_payload
+    assert any(
+        row["decision_to_outcome_s"] is not None
+        for row in trace_payload["evaluation_history"]
+    )
     assert (study_dir / "report.md").exists()
 
 
@@ -556,8 +588,14 @@ def test_comparisons_apply_holm_within_declared_families(tmp_path):
     )
     results = run_matrix(matrix, budget=6)
     families = {
-        "family_a": {"methods": ["random_sampling"]},
-        "family_b": {"methods": ["full_factorial"]},
+        "family_a": {
+            "methods": ["random_sampling"],
+            "metrics": ["final_regret", "regret_auc"],
+        },
+        "family_b": {
+            "methods": ["full_factorial"],
+            "metrics": ["final_regret"],
+        },
     }
     study_dir = write_study_artifacts(
         tmp_path,
@@ -569,12 +607,18 @@ def test_comparisons_apply_holm_within_declared_families(tmp_path):
         comparison_families=families,
     )
     comparisons = json.loads((study_dir / "metrics.json").read_text())["comparisons"]
-    by_family = {row["comparison"]: row["family"] for row in comparisons}
-    assert by_family["lhs_vs_random_sampling"] == "family_a"
-    assert by_family["lhs_vs_full_factorial"] == "family_b"
-    # one comparison per family -> Holm within family degenerates to identity
+    assert {
+        (row["comparison"], row["metric"], row["family"])
+        for row in comparisons
+    } == {
+        ("lhs_vs_random_sampling", "final_regret", "family_a"),
+        ("lhs_vs_random_sampling", "regret_auc", "family_a"),
+        ("lhs_vs_full_factorial", "final_regret", "family_b"),
+    }
     for row in comparisons:
-        assert row["p_holm"] == pytest.approx(row["p_value"])
+        assert row["direction"] == "lower_is_better"
+        assert isinstance(row["mean_reference_advantage"], float)
+        assert row["p_holm"] >= row["p_value"]
 
 
 def test_canonical_v1_study_config_is_valid():
@@ -591,6 +635,63 @@ def test_canonical_v1_study_config_is_valid():
     assert len(config.matrix.seeds) >= 20
     assert config.problem_groups  # tiers declared
     assert config.comparison_families  # preregistered contrasts
+
+
+def test_apriori_freezing_studies_declare_four_method_levels_and_new_pathologies():
+    root = Path("benchmarks/methods/configs/studies")
+    continuous = load_study_config(root / "a_priori_freezing_continuous_v1.yaml")
+    route = load_study_config(root / "a_priori_freezing_route_v1.yaml")
+
+    four_levels = {
+        "predictor_ranker",
+        "gp_backend",
+        "agent_recommender",
+        "helios_full",
+    }
+    assert four_levels <= set(continuous.matrix.config_names)
+    assert four_levels <= set(route.matrix.config_names)
+    assert {bundle.id for bundle in continuous.matrix.bundles} >= {
+        "clean",
+        "exec_failure",
+        "instrument_outage",
+        "proxy_shift",
+        "objective_shift",
+    }
+    assert {bundle.id for bundle in route.matrix.bundles} == {
+        "clean",
+        "route_switch_cost",
+    }
+    assert continuous.metrics_config_path.name == "pathology_metrics_v2.yaml"
+    assert route.metrics_config_path.name == "pathology_metrics_v2.yaml"
+
+
+def test_capability_manifest_keeps_shadow_and_physical_boundaries_explicit():
+    from benchmarks.methods.capability_manifest import build_capability_manifest
+
+    manifest = build_capability_manifest(
+        (
+            "predictor_ranker",
+            "gp_backend",
+            "agent_recommender",
+            "helios_full",
+            "helios_full/no-failure-memory",
+        )
+    )
+    profiles = {profile["method"]: profile for profile in manifest["methods"]}
+
+    assert manifest["contract_version"] == "benchmark_capabilities.v1"
+    assert profiles["predictor_ranker"]["method_level"] == "predictor"
+    assert profiles["gp_backend"]["method_level"] == "bo"
+    assert profiles["agent_recommender"]["method_level"] == "agent_recommender"
+    assert (
+        profiles["helios_full"]["capabilities"]["scientific_intervention_ranking"]
+        == "shadow_only"
+    )
+    assert profiles["helios_full"]["capabilities"]["physical_execution"] == "not_modeled"
+    assert (
+        profiles["helios_full/no-failure-memory"]["capabilities"]["failure_memory"]
+        == "disabled_by_ablation"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -619,7 +720,7 @@ def test_manifest_records_environment_provenance(tmp_path):
     assert manifest["git_dirty"] is False or manifest["git_diff_hash"]
     assert manifest["python_version"]
     assert manifest["dependency_lock_hash"]
-    assert manifest["pathology_schema_version"] == 1
+    assert manifest["pathology_schema_version"] == 2
     assert manifest["metric_schema_version"] == 1
 
 

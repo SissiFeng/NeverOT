@@ -17,6 +17,7 @@ from typing import Any
 import app.optimization  # noqa: F401 - registers optional HELIOS backends
 import benchmarks.methods.doe_backend  # noqa: F401 - registers DoE baselines
 import benchmarks.methods.helios_full  # noqa: F401 - registers helios_full
+import benchmarks.methods.reviewer_baselines  # noqa: F401 - registers review baselines
 from app.services.optimization_backends import list_backends
 from benchmarks.methods.problems import get_problem, get_problems
 from benchmarks.methods.recommend import recommend

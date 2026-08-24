@@ -7,6 +7,7 @@ For each (problem x backend x seed) cell:
    ``Observation`` (sign-flipped to maximization) -> repeat until ``budget``
    evaluations are spent.
 3. Track best-so-far (minimization) at each evaluation.
+4. Record backend decision evidence when the backend exposes it.
 
 The loop is defensive: a backend that raises is recorded with an ``error`` and
 the study continues with the other cells (one bad method never kills the run).
@@ -42,6 +43,7 @@ class RunTrace:
     best_so_far: list[float] = field(default_factory=list)
     evals: list[int] = field(default_factory=list)
     backend_history: list[str] = field(default_factory=list)
+    backend_decision_history: list[dict[str, Any]] = field(default_factory=list)
     evaluation_history: list[dict[str, Any]] = field(default_factory=list)
     wall_s: float = 0.0
     error: str | None = None
@@ -67,11 +69,16 @@ def run_cell(
     evals: list[int] = []
     observations: list[Observation] = []
     backend_history: list[str] = []
+    backend_decision_history: list[dict[str, Any]] = []
     evaluation_history: list[dict[str, Any]] = []
     best: float | None = None
     t0 = time.perf_counter()
 
-    def _record(params: dict[str, Any]) -> None:
+    def _record(
+        params: dict[str, Any],
+        *,
+        decision_started_at: float | None = None,
+    ) -> None:
         nonlocal best
         evaluation = _evaluate(problem, params)
         f = float(evaluation.raw_value)
@@ -95,6 +102,11 @@ def run_cell(
                 "execution_success": evaluation.execution_success,
                 "qc_passed": evaluation.qc_passed,
                 "failure_type": evaluation.failure_type,
+                "decision_to_outcome_s": (
+                    time.perf_counter() - decision_started_at
+                    if decision_started_at is not None
+                    else None
+                ),
                 "metadata": dict(evaluation.metadata),
             }
         )
@@ -113,11 +125,16 @@ def run_cell(
         while len(best_so_far) < budget:
             round_seed += 1
             take = min(batch, budget - len(best_so_far))
+            decision_started_at = time.perf_counter()
             candidates = backend.suggest(
                 space, take, observations, seed=round_seed
             )
             backend_history.append(
                 str(getattr(backend, "last_selected_backend", backend_name))
+            )
+            decision_evidence = getattr(backend, "last_decision_evidence", {})
+            backend_decision_history.append(
+                dict(decision_evidence) if isinstance(decision_evidence, dict) else {}
             )
             if not candidates:
                 logger.warning(
@@ -126,7 +143,7 @@ def run_cell(
                 )
                 break
             for params in candidates[:take]:
-                _record(params)
+                _record(params, decision_started_at=decision_started_at)
     except Exception as exc:  # noqa: BLE001 -- isolate one bad backend
         logger.exception(
             "study cell failed: problem=%s backend=%s seed=%s",
@@ -141,6 +158,7 @@ def run_cell(
             best_so_far=best_so_far,
             evals=evals,
             backend_history=backend_history,
+            backend_decision_history=backend_decision_history,
             evaluation_history=evaluation_history,
             wall_s=time.perf_counter() - t0,
             error=f"{type(exc).__name__}: {exc}",
@@ -153,6 +171,7 @@ def run_cell(
         best_so_far=best_so_far,
         evals=evals,
         backend_history=backend_history,
+        backend_decision_history=backend_decision_history,
         evaluation_history=evaluation_history,
         wall_s=time.perf_counter() - t0,
     )

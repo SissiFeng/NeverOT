@@ -1,0 +1,26 @@
+schema_version: 2
+author: benchmark
+description: >
+  Event-grounded metrics for the a-priori-freezing studies. Version 2 adds
+  explicit recovery success plus instrument-outage and route-switch evidence.
+
+thresholds:
+  epsilon: 1.0e-6
+  recovery_window: 5
+  recovery_tolerance: 0.1
+  lag_window: 5
+  lag_delta: 0.1
+  lag_sustain: 3
+  constraint_window: 8
+  constraint_ratio_threshold: 0.5
+  constraint_sustain: 3
+  decision_window: 5
+
+response_class_mapping:
+  noise_drift: [backend_switch, exploration_action]
+  spatial_failure: [backend_switch, constraint_filter, exploration_action]
+  instrument_outage: [backend_switch, exploration_action]
+  route_switch_cost: []
+  censoring: [exploration_action, backend_switch]
+  proxy_gap_shift: [backend_switch, exploration_action]
+  objective_shift: [backend_switch, exploration_action]

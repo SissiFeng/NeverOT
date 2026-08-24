@@ -1,0 +1,42 @@
+schema_version: 1
+study_name: a-priori-freezing-route-v1
+description: >
+  Seed-paired route-as-action comparison on the mixed categorical problem.
+  Switching the categorical route incurs an observed execution cost while the
+  clean raw objective remains the regret ruler.
+
+metrics_config: benchmarks/methods/configs/pathology_metrics_v2.yaml
+
+problem_groups:
+  route_as_action:
+    - mixed_categorical
+
+pathologies:
+  - id: clean
+    specs: []
+  - id: route_switch_cost
+    specs:
+      - type: route_switch_cost
+        params:
+          route_parameter: shape
+          switching_cost: 2.0
+
+configs:
+  - predictor_ranker
+  - gp_backend
+  - agent_recommender
+  - helios_full
+
+seeds: "0..19"
+budget: 30
+reference: helios_full
+
+comparison_families:
+  method_levels:
+    methods: [predictor_ranker, gp_backend, agent_recommender]
+    metrics:
+      - final_regret
+      - regret_auc
+      - endpoint_attained
+      - evals_to_target_censored
+      - resource_cost

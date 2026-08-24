@@ -259,6 +259,11 @@ HELIOS is framed as an orchestrator-agnostic adaptive campaign decision layer. T
 
 The architecture validation report is version-controlled at [docs/HELIOS_ARCHITECTURE_VALIDATION.md](docs/HELIOS_ARCHITECTURE_VALIDATION.md). It is a static evidence pack for the current validation boundary.
 
+The [a-priori-freezing benchmark protocol](docs/a_priori_freezing_benchmark.md)
+defines the four-level Predictor → BO → Agent recommender → HELIOS comparison,
+controlled non-stationarity, system-level endpoint metrics, paired statistics,
+capability evidence, and the boundary between simulated and physical claims.
+
 Run the validation suite:
 
 ```bash

@@ -7,9 +7,11 @@ import pytest
 
 from benchmarks.methods.pathologies import (
     Censoring,
+    InstrumentOutage,
     NoiseDrift,
     ObjectiveShift,
     ProxyGapShift,
+    RouteSwitchCost,
     SpatialFailure,
     apply_pathology,
     in_failure_region,
@@ -40,13 +42,15 @@ def test_noise_drift_bias_grows_linearly_after_onset():
         _sphere(), [NoiseDrift(start_eval=3, rate=0.5, mode="linear")], seed=0
     )
 
-    observed = [wrapped.evaluate(ORIGIN).observed_value for _ in range(6)]
+    evaluations = [wrapped.evaluate(ORIGIN) for _ in range(6)]
+    observed = [evaluation.observed_value for evaluation in evaluations]
 
     # Evals 1-3 untouched; bias = rate * (eval_index - start_eval) afterwards.
     assert observed[:3] == [0.0, 0.0, 0.0]
     assert observed[3] == pytest.approx(0.5)
     assert observed[4] == pytest.approx(1.0)
     assert observed[5] == pytest.approx(1.5)
+    assert evaluations[3].objective_values["endpoint_observed"] == 1.0
     # raw ruler never corrupted
     assert all(e.raw_value == 0.0 for e in [wrapped.evaluate(ORIGIN)])
     # exactly one onset event, at the first affected eval
@@ -79,6 +83,7 @@ def test_spatial_failure_fires_only_inside_region():
     assert at_center.failure_type == "pathology_execution_failure"
     assert at_center.observed_value == pytest.approx(at_center.raw_value + 10.0)
     assert at_center.raw_value == 0.0  # ruler untouched
+    assert at_center.objective_values["failure_region_applicable"] == 1.0
 
     far = wrapped.evaluate(CORNER)
     assert far.execution_success is True
@@ -123,6 +128,7 @@ def test_censoring_clips_observed_and_flags_metadata():
     assert censored.observed_value == 1.0
     assert censored.raw_value == 4.0
     assert censored.metadata["censored"] is True
+    assert censored.objective_values["endpoint_observed"] == 1.0
     assert clear.observed_value == 0.25
     assert "censored" not in clear.metadata
 
@@ -145,10 +151,69 @@ def test_proxy_gap_shift_changes_mapping_at_shift_eval():
     assert all(e.observed_value == 1.0 for e in before)
     assert after.observed_value == pytest.approx(2.0 * 1.0 + 3.0)
     assert after.raw_value == 1.0
+    assert after.objective_values["endpoint_observed"] == 1.0
 
     events = [e for e in state.events if e.event_type == "proxy_gap_shift"]
     assert len(events) == 1
     assert events[0].eval_index == 3
+
+
+def test_instrument_outage_marks_a_bounded_failure_window():
+    wrapped, state = apply_pathology(
+        _sphere(),
+        [
+            InstrumentOutage(
+                start_eval=2,
+                duration=2,
+                instrument_id="potentiostat",
+                observed_penalty=9.0,
+            )
+        ],
+        seed=0,
+    )
+
+    evaluations = [wrapped.evaluate(ORIGIN) for _ in range(5)]
+
+    assert [item.execution_success for item in evaluations] == [
+        True,
+        True,
+        False,
+        False,
+        True,
+    ]
+    assert evaluations[2].failure_type == "pathology_instrument_outage"
+    assert evaluations[2].observed_value == pytest.approx(9.0)
+    assert "failure_region_applicable" not in evaluations[2].objective_values
+    events = [event for event in state.events if event.event_type == "instrument_outage"]
+    assert len(events) == 1
+    assert events[0].eval_index == 3
+    assert events[0].duration == 2
+    assert events[0].details["instrument_id"] == "potentiostat"
+
+
+def test_route_switch_cost_is_observed_but_does_not_change_true_regret():
+    wrapped, state = apply_pathology(
+        get_problem("mixed_categorical"),
+        [RouteSwitchCost(route_parameter="shape", switching_cost=2.0)],
+        seed=0,
+    )
+
+    first = wrapped.evaluate({"shape": "circle", "x": 0.5})
+    switched = wrapped.evaluate({"shape": "square", "x": 0.5})
+    retained = wrapped.evaluate({"shape": "square", "x": 0.5})
+
+    assert first.observed_value == pytest.approx(0.0)
+    assert switched.raw_value == pytest.approx(1.5)
+    assert switched.observed_value == pytest.approx(3.5)
+    assert switched.metadata["resource_cost"] == pytest.approx(2.0)
+    assert retained.observed_value == pytest.approx(1.5)
+    events = [event for event in state.events if event.event_type == "route_switch_cost"]
+    assert len(events) == 1
+    assert events[0].details == {
+        "from_route": "circle",
+        "route_parameter": "shape",
+        "to_route": "square",
+    }
 
 
 def test_objective_shift_translates_argmin_but_preserves_optimum_value():

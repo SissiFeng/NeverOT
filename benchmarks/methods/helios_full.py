@@ -13,6 +13,11 @@ from typing import Any
 import app.optimization  # noqa: F401 - registers bomcp/nexus backends
 import benchmarks.methods.doe_backend  # noqa: F401 - registers DoE baselines
 from app.services.candidate_gen import ParameterSpace, sample_lhs
+from app.services.failure_region import (
+    FailureRegionModel,
+    avoid_failure_region,
+    filter_failure_prone,
+)
 from app.services.nexus_early_stage import NexusEarlyStageAdapter
 from app.services.optimization_backends import Observation, get_backend, list_backends, register_backend
 from app.services.strategy_models import CampaignContext, CampaignSnapshot, ObjectiveLevel, PhaseConfig
@@ -29,7 +34,7 @@ class AblationConfig:
     """
 
     strategy_selection: bool = True        # select_strategy vs fixed gp primary
-    failure_memory: bool = True            # failed_params threaded into snapshot
+    failure_memory: bool = True            # snapshot + learned failure-region guard
     observation_correction: bool = True    # corrected/true-objective rewriting
     constraint_controller: bool = True     # early-stage anchors + danger-zone filter
 
@@ -52,6 +57,7 @@ class HeliosFullPortfolioBackend:
 
     def __init__(self) -> None:
         self.last_selected_backend = "initial"
+        self.last_decision_evidence: dict[str, Any] = {}
 
     def suggest(
         self,
@@ -70,28 +76,54 @@ class HeliosFullPortfolioBackend:
             if ablation.observation_correction
             else list(observations)
         )
+        self.last_decision_evidence = {
+            "observation_correction_enabled": ablation.observation_correction,
+            "observations_corrected": sum(
+                original.objective != working.objective
+                for original, working in zip(
+                    observations, working_observations, strict=True
+                )
+            ),
+        }
 
         def _guided(proposed: list[dict[str, Any]]) -> list[dict[str, Any]]:
             """Apply the constraint controller (anchors + danger-zone filter)."""
-            if not ablation.constraint_controller:
-                return proposed[:n]
-            anchored = _with_early_stage_anchors(
-                proposed,
-                report,
-                space,
-                working_observations,
-                n,
-            )
-            constrained = _apply_early_stage_constraints(
-                anchored,
-                report,
-                space,
-                n,
-                seed=seed,
-            )
-            if len(constrained) < len(anchored):
-                self.last_selected_backend = f"{self.last_selected_backend}:early_stage_filtered"
-            return constrained
+            guided = proposed[:n]
+            if ablation.constraint_controller:
+                anchored = _with_early_stage_anchors(
+                    proposed,
+                    report,
+                    space,
+                    working_observations,
+                    n,
+                )
+                guided = _apply_early_stage_constraints(
+                    anchored,
+                    report,
+                    space,
+                    n,
+                    seed=seed,
+                )
+                if len(guided) < len(anchored):
+                    self.last_selected_backend = (
+                        f"{self.last_selected_backend}:early_stage_filtered"
+                    )
+            if ablation.failure_memory:
+                guided, failure_evidence = _apply_failure_memory(
+                    guided,
+                    space,
+                    working_observations,
+                    n=n,
+                    seed=seed,
+                )
+            else:
+                failure_evidence = {
+                    "failure_memory_enabled": False,
+                    "known_failure_points": 0,
+                    "failure_prone_proposals_removed": 0,
+                }
+            self.last_decision_evidence.update(failure_evidence)
+            return guided[:n]
 
         if len(observations) < max(3, min(8, space.n_dims + 1)):
             self.last_selected_backend = "lhs"
@@ -191,6 +223,7 @@ def _snapshot_from_observations(
             dict(obs.params)
             for obs in observations
             if (obs.objectives or {}).get("execution_success") == 0.0
+            and (obs.objectives or {}).get("failure_region_applicable") == 1.0
         )
         if include_failed
         else (),
@@ -274,14 +307,13 @@ def _observations_for_helios(
     report: dict[str, Any] | None,
     observations: list[Observation],
 ) -> list[Observation]:
-    if not report:
-        return observations
-    risk_flags = set(report.get("risk_flags", []))
+    risk_flags = set(report.get("risk_flags", [])) if report else set()
     use_true_objective = "objective_missing" in risk_flags
     use_corrected_objective = bool(
         risk_flags & {"low_data_quality", "batch_effect_detected", "instrument_drift_detected"}
     )
-    if not use_true_objective and not use_corrected_objective:
+    use_endpoint_channel = report is None
+    if not use_true_objective and not use_corrected_objective and not use_endpoint_channel:
         return observations
 
     converted: list[Observation] = []
@@ -289,11 +321,23 @@ def _observations_for_helios(
         objectives = obs.objectives or {}
         corrected = objectives.get("corrected_objective")
         true_objective = objectives.get("true_objective")
+        endpoint_is_observed = objectives.get("endpoint_observed") == 1.0
+        execution_succeeded = objectives.get("execution_success", 1.0) == 1.0
+        qc_passed = objectives.get("qc_passed", 1.0) == 1.0
         replacement = (
             corrected
             if use_corrected_objective and corrected is not None
             else true_objective
             if true_objective is not None
+            and (
+                use_true_objective
+                or (
+                    use_endpoint_channel
+                    and endpoint_is_observed
+                    and execution_succeeded
+                    and qc_passed
+                )
+            )
             else obs.objective
         )
         converted.append(
@@ -304,6 +348,44 @@ def _observations_for_helios(
             )
         )
     return converted
+
+
+def _apply_failure_memory(
+    candidates: list[dict[str, Any]],
+    space: ParameterSpace,
+    observations: list[Observation],
+    *,
+    n: int,
+    seed: int | None,
+) -> tuple[list[dict[str, Any]], dict[str, int | bool]]:
+    """Apply the existing learned-failure-region guard to benchmark proposals."""
+    failed = [
+        dict(observation.params)
+        for observation in observations
+        if (observation.objectives or {}).get("execution_success") == 0.0
+        and (observation.objectives or {}).get("failure_region_applicable") == 1.0
+    ]
+    if not failed:
+        return candidates[:n], {
+            "failure_memory_enabled": True,
+            "known_failure_points": 0,
+            "failure_prone_proposals_removed": 0,
+        }
+
+    model = FailureRegionModel.fit(failed=failed, space=space)
+    retained = filter_failure_prone(candidates, model)
+    selected = avoid_failure_region(
+        candidates,
+        space,
+        n,
+        failed,
+        seed=seed,
+    )
+    return selected, {
+        "failure_memory_enabled": True,
+        "known_failure_points": len(failed),
+        "failure_prone_proposals_removed": len(candidates) - len(retained),
+    }
 
 
 def _objective_level_for_report(risk_flags: set[str]) -> ObjectiveLevel:

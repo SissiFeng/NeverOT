@@ -1,7 +1,7 @@
 """Ablation harness: matrix runner, event-grounded metrics, study artifacts.
 
 Runs ``problems x pathology bundles x backend configs x seeds`` through the
-**unmodified** :func:`benchmarks.methods.runner.run_cell`, grounds every
+public :func:`benchmarks.methods.runner.run_cell`, grounds every
 adaptation metric in the pathology event ledger, and writes a reproducible
 study directory (``matrix.json`` is the single source of truth).
 
@@ -10,10 +10,13 @@ Two report surfaces keep the narrative honest:
 - ``tables/main_benchmark.csv`` -- all methods, standard raw-value metrics
   (final regret, regret AUC, evals-to-target) under each pathology.
 - ``tables/mechanism_analysis.csv`` -- HELIOS variants only: decision quality,
-  recovery efficiency, adaptation lag, constraint adaptation latency.
+  recovery success/efficiency, adaptation lag, constraint adaptation latency.
+- ``tables/system_endpoints.csv`` -- endpoint attainment, censored sample
+  efficiency, failures, simulated latency, observed cost and interventions.
+- ``capability_manifest.json`` -- live/shadow/not-modelled evidence boundaries.
 
 Metric thresholds and the event-type -> response-class mapping come from a
-versioned YAML config (``configs/pathology_metrics.yaml``); nothing is
+versioned YAML config (for example ``configs/pathology_metrics_v2.yaml``); nothing is
 hardcoded.  Design: docs/plans/2026-07-22-pathology-benchmark-evaluation-layer-design.md.
 """
 from __future__ import annotations
@@ -36,7 +39,9 @@ from typing import Any
 import yaml
 
 import benchmarks.methods.helios_full  # noqa: F401 - registers helios_full + variants
+import benchmarks.methods.reviewer_baselines  # noqa: F401 - registers review baselines
 from app.services.candidate_gen import ParameterSpace
+from benchmarks.methods.capability_manifest import build_capability_manifest
 from benchmarks.methods.helios_full import BACKEND_VARIANTS
 from benchmarks.methods.metrics import convergence_auc, evals_to_target, simple_regret
 from benchmarks.methods.pathologies import (
@@ -57,6 +62,7 @@ DEFAULT_METRICS_CONFIG_PATH = Path(__file__).parent / "configs" / "pathology_met
 # Event types measured by adaptation lag (onset-style, not per-eval failures).
 DRIFT_EVENT_TYPES = ("noise_drift", "proxy_gap_shift", "objective_shift", "censoring")
 FAILURE_EVENT_TYPE = "spatial_failure"
+FAILURE_EVENT_TYPES = {FAILURE_EVENT_TYPE, "instrument_outage"}
 
 
 # ---------------------------------------------------------------------------
@@ -100,6 +106,13 @@ class RecoveryResult:
     skipped: int
 
 
+@dataclass(frozen=True)
+class RecoverySuccessResult:
+    success_rate: float | None
+    per_event: list[bool]
+    skipped: int
+
+
 def recovery_efficiency(
     best_so_far: list[float],
     events: list[PathologyEvent],
@@ -134,6 +147,40 @@ def recovery_efficiency(
         else None
     )
     return RecoveryResult(mean_ratio=mean, per_event=per_event, skipped=skipped)
+
+
+def recovery_success_rate(
+    raw_values: list[float],
+    events: list[PathologyEvent],
+    *,
+    window: int,
+    tolerance: float,
+) -> RecoverySuccessResult:
+    """Fraction of failure events followed by return to the pre-event ruler.
+
+    A recovery succeeds when a post-event raw value, within the fixed window,
+    is no worse than the best pre-event value plus the declared tolerance.
+    The failed evaluation itself is excluded from the post-event window.
+    """
+    raws = [float(value) for value in raw_values]
+    outcomes: list[bool] = []
+    skipped = 0
+    for event in events:
+        if event.event_type not in FAILURE_EVENT_TYPES:
+            continue
+        onset = event.eval_index - 1
+        before = raws[max(0, onset - int(window)) : onset]
+        after = raws[onset + 1 : onset + 1 + int(window)]
+        if not before or not after:
+            skipped += 1
+            continue
+        threshold = min(before) + float(tolerance)
+        outcomes.append(any(value <= threshold for value in after))
+    return RecoverySuccessResult(
+        success_rate=statistics.fmean(outcomes) if outcomes else None,
+        per_event=outcomes,
+        skipped=skipped,
+    )
 
 
 @dataclass(frozen=True)
@@ -667,6 +714,7 @@ def _compute_cell_metrics(
     *,
     n_init: int,
     batch: int,
+    budget: int,
     tol: float = DEFAULT_TOL,
 ) -> dict[str, Any]:
     base = get_problem(result.cell.problem_id)
@@ -684,6 +732,12 @@ def _compute_cell_metrics(
         optimum,
         window=int(t["recovery_window"]),
         epsilon=t["epsilon"],
+    )
+    recovery_success = recovery_success_rate(
+        raws,
+        result.events,
+        window=int(t["recovery_window"]),
+        tolerance=float(t.get("recovery_tolerance", t["lag_delta"])),
     )
     lag = adaptation_lag(
         raws,
@@ -714,15 +768,51 @@ def _compute_cell_metrics(
         quality = dataclasses.asdict(quality_result)
 
     epochs = epoch_metrics(raws, result.events, optimum)
+    endpoint_eval = evals_to_target(best, optimum, tol) if best else None
+    metadata_rows = [dict(history.get("metadata", {})) for history in trace.evaluation_history]
+    decision_to_outcome_times = [
+        float(history["decision_to_outcome_s"])
+        for history in trace.evaluation_history
+        if history.get("decision_to_outcome_s") is not None
+    ]
+    resource_cost_observed = any("resource_cost" in row for row in metadata_rows)
+    human_interventions_observed = any("human_intervention" in row for row in metadata_rows)
     return {
         "final_regret": simple_regret(best, optimum) if best else None,
         "regret_auc": convergence_auc(best, optimum) if best else None,
-        "evals_to_target": evals_to_target(best, optimum, tol) if best else None,
+        "evals_to_target": endpoint_eval,
+        "evals_to_target_censored": (
+            endpoint_eval if endpoint_eval is not None else int(budget) + 1
+        ),
+        "endpoint_attained": endpoint_eval is not None,
         "dynamic_regret_auc": dynamic_regret_auc(raws, optimum) if raws else None,
         "epochs": epochs,
         "final_epoch_regret": epochs[-1]["simple_regret"] if epochs else None,
         "n_events": len(result.events),
+        "failed_experiments": sum(
+            1
+            for history in trace.evaluation_history
+            if history.get("execution_success") is False
+        ),
+        "simulated_decision_to_outcome_time_s": (
+            statistics.fmean(decision_to_outcome_times)
+            if decision_to_outcome_times
+            else None
+        ),
+        "resource_cost": (
+            sum(float(row.get("resource_cost", 0.0)) for row in metadata_rows)
+            if resource_cost_observed
+            else None
+        ),
+        "resource_cost_observed": resource_cost_observed,
+        "human_interventions": (
+            sum(1 for row in metadata_rows if row.get("human_intervention") is True)
+            if human_interventions_observed
+            else None
+        ),
+        "human_interventions_observed": human_interventions_observed,
         "recovery_efficiency": dataclasses.asdict(recovery),
+        "recovery_success": dataclasses.asdict(recovery_success),
         "adaptation_lag": dataclasses.asdict(lag),
         "constraint_adaptation": dataclasses.asdict(latency),
         "decision_quality": quality,
@@ -766,6 +856,34 @@ def _assign_family(
     return "default"
 
 
+def _comparison_metric_value(metrics: dict[str, Any], name: str) -> float | None:
+    nested = {
+        "recovery_success": ("recovery_success", "success_rate"),
+        "recovery_efficiency": ("recovery_efficiency", "mean_ratio"),
+        "adaptation_lag": ("adaptation_lag", "mean_lag"),
+        "constraint_adaptation": ("constraint_adaptation", "latency"),
+        "decision_quality": ("decision_quality", "hit_rate"),
+    }
+    if name in nested:
+        parent, child = nested[name]
+        value = (metrics.get(parent) or {}).get(child)
+    else:
+        value = metrics.get(name)
+    if value is None:
+        return None
+    return float(value)
+
+
+def _comparison_metric_direction(name: str) -> str:
+    higher_is_better = {
+        "decision_quality",
+        "endpoint_attained",
+        "recovery_efficiency",
+        "recovery_success",
+    }
+    return "higher_is_better" if name in higher_is_better else "lower_is_better"
+
+
 def _comparisons(
     results: list[CellResult],
     cell_metrics: dict[str, dict[str, Any]],
@@ -787,32 +905,51 @@ def _comparisons(
         if not reference_group:
             continue
         ref_by_seed = {r.cell.seed: r for r in reference_group}
-        diffs: list[float] = []
-        for result in group:
-            ref = ref_by_seed.get(result.cell.seed)
-            if ref is None:
+        family_name = _assign_family(config, bundle_id, families or {})
+        family = (families or {}).get(family_name, {})
+        metric_names = [str(name) for name in family.get("metrics", ["final_regret"])]
+        for metric_name in metric_names:
+            direction = _comparison_metric_direction(metric_name)
+            effects: list[float] = []
+            for result in group:
+                ref = ref_by_seed.get(result.cell.seed)
+                if ref is None:
+                    continue
+                other_value = _comparison_metric_value(
+                    cell_metrics[result.cell.cell_id], metric_name
+                )
+                reference_value = _comparison_metric_value(
+                    cell_metrics[ref.cell.cell_id], metric_name
+                )
+                if other_value is None or reference_value is None:
+                    continue
+                effect = (
+                    other_value - reference_value
+                    if direction == "lower_is_better"
+                    else reference_value - other_value
+                )
+                effects.append(effect)
+            if not effects:
                 continue
-            a = cell_metrics[result.cell.cell_id].get("final_regret")
-            b = cell_metrics[ref.cell.cell_id].get("final_regret")
-            if a is None or b is None:
-                continue
-            diffs.append(float(a) - float(b))  # positive = reference better
-        if not diffs:
-            continue
-        boot = paired_bootstrap(diffs, seed=0)
-        rows.append(
-            {
-                "problem": problem_id,
-                "pathology": bundle_id,
-                "comparison": f"{reference}_vs_{config}",
-                "family": _assign_family(config, bundle_id, families or {}),
-                "n_pairs": len(diffs),
-                "mean_regret_delta_other_minus_reference": boot.mean,
-                "ci_low": boot.ci_low,
-                "ci_high": boot.ci_high,
-                "p_value": boot.p_value,
-            }
-        )
+            boot = paired_bootstrap(effects, seed=0)
+            rows.append(
+                {
+                    "problem": problem_id,
+                    "pathology": bundle_id,
+                    "comparison": f"{reference}_vs_{config}",
+                    "family": family_name,
+                    "metric": metric_name,
+                    "direction": direction,
+                    "n_pairs": len(effects),
+                    "mean_reference_advantage": boot.mean,
+                    "mean_regret_delta_other_minus_reference": (
+                        boot.mean if metric_name == "final_regret" else None
+                    ),
+                    "ci_low": boot.ci_low,
+                    "ci_high": boot.ci_high,
+                    "p_value": boot.p_value,
+                }
+            )
     by_family: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
         by_family.setdefault(row["family"], []).append(row)
@@ -842,6 +979,9 @@ def _main_table_rows(
                 "mean_evals_to_target": _mean_or_none(
                     [m["evals_to_target"] for m in metrics]
                 ),
+                "mean_evals_to_target_censored": _mean_or_none(
+                    [m["evals_to_target_censored"] for m in metrics]
+                ),
                 "mean_dynamic_regret_auc": _mean_or_none(
                     [m["dynamic_regret_auc"] for m in metrics]
                 ),
@@ -853,6 +993,18 @@ def _main_table_rows(
                 )
                 if metrics
                 else None,
+                "mean_failed_experiments": _mean_or_none(
+                    [m["failed_experiments"] for m in metrics]
+                ),
+                "mean_simulated_decision_to_outcome_time_s": _mean_or_none(
+                    [m["simulated_decision_to_outcome_time_s"] for m in metrics]
+                ),
+                "mean_resource_cost": _mean_or_none(
+                    [m["resource_cost"] for m in metrics]
+                ),
+                "mean_human_interventions": _mean_or_none(
+                    [m["human_interventions"] for m in metrics]
+                ),
             }
         )
     return rows
@@ -881,6 +1033,9 @@ def _mechanism_table_rows(
                 ),
                 "mean_recovery_efficiency": _mean_or_none(
                     [m["recovery_efficiency"]["mean_ratio"] for m in metrics]
+                ),
+                "mean_recovery_success_rate": _mean_or_none(
+                    [m["recovery_success"]["success_rate"] for m in metrics]
                 ),
                 "mean_adaptation_lag": _mean_or_none(
                     [m["adaptation_lag"]["mean_lag"] for m in metrics]
@@ -970,7 +1125,11 @@ def write_study_artifacts(
             metrics: dict[str, Any] | None = None
         else:
             metrics = _compute_cell_metrics(
-                result, metrics_config, n_init=n_init, batch=batch
+                result,
+                metrics_config,
+                n_init=n_init,
+                batch=batch,
+                budget=budget,
             )
         cell_rows.append(
             {
@@ -1030,6 +1189,14 @@ def write_study_artifacts(
         ),
         encoding="utf-8",
     )
+    (study_dir / "capability_manifest.json").write_text(
+        json.dumps(
+            build_capability_manifest(matrix.config_names),
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
     (study_dir / "tables" / "main_benchmark.csv").write_text(
         _rows_to_csv(
             main_rows,
@@ -1042,9 +1209,14 @@ def write_study_artifacts(
                 "mean_final_regret",
                 "mean_regret_auc",
                 "mean_evals_to_target",
+                "mean_evals_to_target_censored",
                 "target_hit_rate",
                 "mean_dynamic_regret_auc",
                 "mean_final_epoch_regret",
+                "mean_failed_experiments",
+                "mean_simulated_decision_to_outcome_time_s",
+                "mean_resource_cost",
+                "mean_human_interventions",
             ],
         ),
         encoding="utf-8",
@@ -1059,8 +1231,28 @@ def write_study_artifacts(
                 "n_seeds",
                 "mean_decision_quality",
                 "mean_recovery_efficiency",
+                "mean_recovery_success_rate",
                 "mean_adaptation_lag",
                 "mean_constraint_latency",
+            ],
+        ),
+        encoding="utf-8",
+    )
+    (study_dir / "tables" / "system_endpoints.csv").write_text(
+        _rows_to_csv(
+            main_rows,
+            [
+                "problem",
+                "pathology",
+                "config",
+                "n_seeds",
+                "target_hit_rate",
+                "mean_evals_to_target",
+                "mean_evals_to_target_censored",
+                "mean_failed_experiments",
+                "mean_simulated_decision_to_outcome_time_s",
+                "mean_resource_cost",
+                "mean_human_interventions",
             ],
         ),
         encoding="utf-8",
@@ -1151,7 +1343,9 @@ def _render_report(
                 "problem",
                 "pathology",
                 "comparison",
-                "mean_regret_delta_other_minus_reference",
+                "metric",
+                "direction",
+                "mean_reference_advantage",
                 "ci_low",
                 "ci_high",
                 "p_holm",
