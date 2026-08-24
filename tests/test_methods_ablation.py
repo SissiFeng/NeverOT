@@ -283,9 +283,15 @@ def test_study_id_deterministic_and_sensitive():
     b = study_id_for(matrix, metrics_config_hash="abc", git_commit="deadbeef")
     c = study_id_for(matrix, metrics_config_hash="xyz", git_commit="deadbeef")
     d = study_id_for(matrix, metrics_config_hash="abc", git_commit="cafef00d")
+    e = study_id_for(
+        matrix,
+        metrics_config_hash="abc",
+        git_commit="deadbeef",
+        environment_fingerprint={"dependency_lock_hash": "changed"},
+    )
     assert a == b
     assert len(a) == 12
-    assert len({a, c, d}) == 3
+    assert len({a, c, d, e}) == 4
 
 
 def test_default_metrics_config_loads_and_covers_all_pathologies():

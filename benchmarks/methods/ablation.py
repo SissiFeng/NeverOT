@@ -589,7 +589,8 @@ def _environment_provenance() -> dict[str, Any]:
     diff_hash = None
     if dirty:
         diff = _git("diff", "HEAD") or ""
-        diff_hash = hashlib.sha256(diff.encode("utf-8")).hexdigest()
+        dirty_fingerprint = f"{status}\n{diff}"
+        diff_hash = hashlib.sha256(dirty_fingerprint.encode("utf-8")).hexdigest()
     repo_root = Path(__file__).resolve().parents[2]
     lock = repo_root / "uv.lock"
     dep_source = lock if lock.exists() else repo_root / "pyproject.toml"
@@ -612,17 +613,20 @@ def study_id_for(
     *,
     metrics_config_hash: str,
     git_commit: str,
+    environment_fingerprint: dict[str, Any] | None = None,
 ) -> str:
     """Content-addressed study identity.
 
-    Includes the metric definitions (config hash + schema) and the code
-    version, so changing either can never silently collide with old results.
+    Includes the metric definitions, code version, dirty-tree fingerprint, and
+    runtime/dependency provenance, so changing any of them cannot silently
+    collide with an old result.
     """
     payload = json.dumps(
         {
             "matrix": matrix.to_dict(),
             "metrics_config_hash": metrics_config_hash,
             "git_commit": git_commit,
+            "environment_fingerprint": environment_fingerprint or {},
         },
         sort_keys=True,
     )
@@ -1087,10 +1091,12 @@ def write_study_artifacts(
     content hash must never silently overwrite prior results.
     """
     git_commit = _git_commit()
+    environment = _environment_provenance()
     study_id = study_id_for(
         matrix,
         metrics_config_hash=metrics_config.content_hash,
         git_commit=git_commit,
+        environment_fingerprint=environment,
     )
     study_dir = Path(output_dir) / study_id
     if study_dir.exists() and not force:
@@ -1169,7 +1175,7 @@ def write_study_artifacts(
         "metrics_config_hash": metrics_config.content_hash,
         "metric_schema_version": metrics_config.schema_version,
         "git_commit": git_commit,
-        **_environment_provenance(),
+        **environment,
         "created_at": datetime.now(UTC).isoformat(),
     }
     (study_dir / "matrix.json").write_text(

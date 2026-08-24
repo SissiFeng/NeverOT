@@ -94,6 +94,8 @@ Each content-addressed study directory contains the full matrix, environment
 provenance, capability manifest, raw traces, ground-truth event ledgers,
 per-cell metrics, paired comparisons, and paper-facing tables. A dirty worktree
 is recorded in the manifest and should not be treated as publication evidence.
+The study identifier includes the commit, dirty-tree fingerprint, dependency
+lock, Python version, pathology schema, matrix, and metric configuration.
 
 ## Interpretation boundary
 
